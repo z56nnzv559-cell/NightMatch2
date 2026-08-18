@@ -38,7 +38,7 @@ npx wrangler login
 # D1 は単一ロケーション。置き場所は作成時にしか決められない
 npx wrangler d1 create akari --location apac
 # 出力された database_id を wrangler.jsonc の <id> に貼る
-npm run db:migrate           # 0001 → 0003 を本番に適用
+npm run db:migrate           # 0001 → 0004 を本番に適用
 ```
 
 ### 2. KV / R2 / Queues
@@ -170,12 +170,31 @@ src/
   photos.ts         原本は非公開。派生のみ配信
   admin.ts          管理画面 API（Cloudflare Access の内側）
   consumers.ts      キュー消費と cron
+  auth.ts           鍵導出・合言葉・総当たり対策
   ledger.ts         台帳の読み方（何を請求できるか）の判定
   env.ts            型、JWT、署名、年齢判定、通知の宛先
   client/           画面（React + Vite）
-migrations/         D1。0001 初期 / 0002 返信率と審査 / 0003 通知と監査
+migrations/         D1。0001 初期 / 0002 返信率と審査 / 0003 通知と監査 /
+                    0004 ログイン
 test/               vitest。金の経路と権限のテスト
 ```
+
+## 入り方
+
+店舗と本人で分ける。本人側に連絡先を持たせないのは、夜職の身バレが
+メールアドレスと電話番号から起きるため。
+
+| | 登録 | 入り直す |
+|---|---|---|
+| 店舗 | `POST /api/auth/shop/register`（自己申告。確認待ちで始まる） | `POST /api/auth/shop/login`（email＋パスワード） |
+| 本人 | `POST /api/auth/worker/register`（合言葉を一度だけ返す） | `POST /api/auth/worker/login`（合言葉） |
+
+**合言葉は登録の応答でしか渡さない。** 再表示の経路は作っていないので、
+控えを失うとその口座には入れなくなる（運営も復元できない）。
+
+店舗は登録した時点では `suspended`。運営が所在地と風営法の許可を確認して
+`POST /admin/shops/:id/verify` を通すまで、応募も受けられず、
+女性の写真もスカウトも触れない。
 
 ## 動かす前に決めておくこと
 
@@ -187,7 +206,15 @@ test/               vitest。金の経路と権限のテスト
 
 ## 未実装
 
+店舗側は登録して確認を受けるところまでしか進めない。求人を出す口と
+女性を探す口が無いので、確認が済んでも実際には何もできない。
+
+- 求人の作成・編集（`jobs` への書き込み経路が無い）
+- 女性の一覧・検索（スカウト相手を見つける経路が無い）
+- 管理画面の UI（API のみ実装済み。請求の確定と送付を押す場所が無い）
+- 保留したお祝い金の解放（振込が再実行されない）
 - Service Worker（`push.ts` の受け側）
 - `notification_fallbacks` を実際にメール送信する処理
-- 管理画面の UI（API のみ実装済み）
+- 会話の話者検証（`Conversation` DO が発言者をクライアント任せにしている）
 - `photos.ts` のテスト（Images バインディングの差し替えが必要）
+- 画面（`client/App.jsx` は見た目の試作で、認証もAPI接続も入っていない）

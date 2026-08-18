@@ -226,8 +226,13 @@ admin.post("/shops/:id/verify", async (c) => {
   const actor = c.get("admin");
   const { licenseNo } = await c.req.json<{ licenseNo: string }>();
 
+  /* 確認できたら掲載できる状態にする。ただし停止中の店舗を戻すだけで、
+     追放した店舗を確認で復活させてはいけない */
   await c.env.DB.prepare(
-    `UPDATE shops SET license_no=?, verified_at=datetime('now') WHERE id=?`
+    `UPDATE shops
+        SET license_no=?, verified_at=datetime('now'),
+            status = CASE WHEN status='suspended' THEN 'active' ELSE status END
+      WHERE id=?`
   )
     .bind(licenseNo, c.req.param("id"))
     .run();

@@ -14,6 +14,22 @@ import {
   toWorker,
   uid,
 } from "./env";
+import {
+  ABSENT_ACCOUNT_HASH,
+  MIN_PASSWORD_LENGTH,
+  byAddress,
+  byEmail,
+  bySelector,
+  clearFailures,
+  hashSecret,
+  looksLikeEmail,
+  newRecoveryCode,
+  normalizeEmail,
+  parseRecoveryCode,
+  recordFailure,
+  tooManyFailures,
+  verifySecret,
+} from "./auth";
 import { CONFIRMED_SQL, OPEN_ACCRUAL_SQL, currentJstMonthStartUtc } from "./ledger";
 import { storePhoto, changeFaceMode, servePhoto, photoUrlFor } from "./photos";
 import { sendDealEvent } from "./deal-workflow";
@@ -45,6 +61,32 @@ const requireShop = (c: any) => {
   if (s?.kind !== "shop") return null;
   return s as Extract<Session, { kind: "shop" }>;
 };
+
+/* セッションを14日で切る。合言葉かパスワードで入り直せる */
+const SESSION_SECONDS = 60 * 60 * 24 * 14;
+
+async function startSession(c: any, session: Session) {
+  setCookie(c, "akari", await signSession(c.env.JWT_SECRET, session, SESSION_SECONDS), {
+    httpOnly: true,
+    secure: true,
+    sameSite: "Lax",
+    path: "/",
+    maxAge: SESSION_SECONDS,
+  });
+}
+
+/* 店舗は自分で登録できる。つまりセッションがあることは
+   「運営が確認した実在の店」を意味しない。女性の情報を渡す経路と
+   連絡を取る経路は、確認が済んだ店舗だけに開く。 */
+async function verifiedShop(env: Env, shopId: string) {
+  const row = await env.DB.prepare(
+    `SELECT id FROM shops
+      WHERE id=? AND status='active' AND verified_at IS NOT NULL`
+  )
+    .bind(shopId)
+    .first();
+  return Boolean(row);
+}
 
 /* 案件の進行を報告できるのは当事者だけ。
    ここが緩いと、無関係の利用者が他人の案件で出勤や本入店を申告して
@@ -89,22 +131,281 @@ app.post("/api/auth/worker/register", async (c) => {
   if (!age.ok) return c.json({ error: age.reason }, 403);
 
   const id = uid("wk");
-  await c.env.DB.prepare(
-    `INSERT INTO workers (id, nickname, birth_date) VALUES (?, ?, ?)`
+
+  /* 入り直すための合言葉。本人に連絡先を持たせない代わりなので、
+     渡すのはこの一度だけ。控えは hash しか残らない */
+  const recovery = newRecoveryCode();
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `INSERT INTO workers (id, nickname, birth_date) VALUES (?, ?, ?)`
+    ).bind(id, body.nickname, body.birthDate),
+    c.env.DB.prepare(
+      `INSERT INTO credentials (id, owner_kind, owner_id, kind, selector, hash)
+       VALUES (?, 'worker', ?, 'recovery_code', ?, ?)`
+    ).bind(uid("cr"), id, recovery.selector, await hashSecret(recovery.verifier)),
+  ]);
+
+  await startSession(c, { kind: "worker", workerId: id });
+
+  /* 登録した時点ではまだ何も見せない。KYC 通過まで応募も写真公開も不可 */
+  return c.json({ workerId: id, recoveryCode: recovery.code, next: "kyc" });
+});
+
+/* 合言葉で入り直す。端末を変えたときと cookie が切れたときの唯一の経路 */
+app.post("/api/auth/worker/login", async (c) => {
+  const body = await c.req.json<{ recoveryCode: string; turnstile: string }>();
+
+  const human = await verifyTurnstile(
+    c.env.TURNSTILE_SECRET,
+    body.turnstile,
+    c.req.header("cf-connecting-ip")
+  );
+  if (!human) return c.json({ error: "challenge_failed" }, 403);
+
+  const parsed = parseRecoveryCode(body.recoveryCode);
+  const ip = c.req.header("cf-connecting-ip") ?? "unknown";
+  const subjects = [byAddress(ip), ...(parsed ? [bySelector(parsed.selector)] : [])];
+
+  if (await tooManyFailures(c.env, subjects)) {
+    return c.json({ error: "too_many_attempts" }, 429);
+  }
+  /* 形が違うだけでも回数を数える。当てに来ている相手を早く止める */
+  if (!parsed) {
+    await recordFailure(c.env, subjects);
+    return c.json({ error: "invalid_code" }, 403);
+  }
+
+  const cred = await c.env.DB.prepare(
+    `SELECT cr.id, cr.hash, cr.owner_id, w.status
+       FROM credentials cr JOIN workers w ON w.id = cr.owner_id
+      WHERE cr.owner_kind='worker' AND cr.kind='recovery_code' AND cr.selector=?`
   )
-    .bind(id, body.nickname, body.birthDate)
+    .bind(parsed.selector)
+    .first<{ id: string; hash: string; owner_id: string; status: string }>();
+
+  /* 前半が当たっているかどうかを応答から読ませない。
+     見つからない場合も同じだけ時間を使い、同じ文言を返す */
+  const ok = await verifySecret(parsed.verifier, cred?.hash ?? ABSENT_ACCOUNT_HASH);
+  if (!cred || !ok) {
+    await recordFailure(c.env, subjects);
+    return c.json({ error: "invalid_code" }, 403);
+  }
+  if (cred.status === "banned") return c.json({ error: "account_closed" }, 403);
+
+  await clearFailures(c.env, subjects);
+  await c.env.DB.prepare(
+    `UPDATE credentials SET last_used_at=datetime('now') WHERE id=?`
+  )
+    .bind(cred.id)
     .run();
 
-  setCookie(c, "akari", await signSession(c.env.JWT_SECRET, { kind: "worker", workerId: id }), {
+  await startSession(c, { kind: "worker", workerId: cred.owner_id });
+  return c.json({ workerId: cred.owner_id });
+});
+
+/* =====================================================================
+   店舗の登録とログイン
+   店舗は自己申告で登録できる。ただし運営が所在地と風営法の許可を
+   確認するまでは suspended のままで、応募も受けられずスカウトも送れない。
+===================================================================== */
+
+app.post("/api/auth/shop/register", async (c) => {
+  const body = await c.req.json<{
+    name: string;
+    area: string;
+    businessType: string;
+    station?: string;
+    email: string;
+    password: string;
+    turnstile: string;
+  }>();
+
+  const human = await verifyTurnstile(
+    c.env.TURNSTILE_SECRET,
+    body.turnstile,
+    c.req.header("cf-connecting-ip")
+  );
+  if (!human) return c.json({ error: "challenge_failed" }, 403);
+
+  const email = normalizeEmail(body.email);
+  if (!looksLikeEmail(email)) return c.json({ error: "invalid_email" }, 400);
+  if ((body.password ?? "").length < MIN_PASSWORD_LENGTH) {
+    return c.json({ error: "password_too_short", minLength: MIN_PASSWORD_LENGTH }, 400);
+  }
+  if (!body.name?.trim() || !body.area?.trim()) {
+    return c.json({ error: "missing_fields" }, 400);
+  }
+
+  /* 料金表は業種で決まる。該当が無ければ落とす。
+     ここで既定値に寄せると、金額が勝手に決まってしまう */
+  const plan = await c.env.DB.prepare(
+    `SELECT id FROM fee_plans
+      WHERE business_type=? AND retired_at IS NULL
+      ORDER BY effective_from DESC LIMIT 1`
+  )
+    .bind(body.businessType)
+    .first<{ id: string }>();
+  if (!plan) return c.json({ error: "unknown_business_type" }, 400);
+
+  const shopId = uid("sh");
+  const memberId = uid("sm");
+  const hash = await hashSecret(body.password);
+
+  try {
+    /* 3つまとめて。途中で失敗して店舗だけ残ると、
+       同じ email で作り直せなくなる */
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO shops (id, name, area, business_type, station, fee_plan_id, status)
+         VALUES (?, ?, ?, ?, ?, ?, 'suspended')`
+      ).bind(
+        shopId,
+        body.name.trim(),
+        body.area.trim(),
+        body.businessType,
+        body.station?.trim() ?? null,
+        plan.id
+      ),
+      c.env.DB.prepare(
+        `INSERT INTO shop_members (id, shop_id, email, role)
+         VALUES (?, ?, ?, 'owner')`
+      ).bind(memberId, shopId, email),
+      c.env.DB.prepare(
+        `INSERT INTO credentials (id, owner_kind, owner_id, kind, hash)
+         VALUES (?, 'shop_member', ?, 'password', ?)`
+      ).bind(uid("cr"), memberId, hash),
+    ]);
+  } catch {
+    /* shop_members.email の一意制約 */
+    return c.json({ error: "email_taken" }, 409);
+  }
+
+  await startSession(c, { kind: "shop", shopId, memberId, role: "owner" });
+  await c.env.NOTIFY.send({ to: "admin", template: "shop.registered" });
+
+  return c.json({ shopId, status: "pending_verification" });
+});
+
+app.post("/api/auth/shop/login", async (c) => {
+  const body = await c.req.json<{
+    email: string;
+    password: string;
+    turnstile: string;
+  }>();
+
+  const human = await verifyTurnstile(
+    c.env.TURNSTILE_SECRET,
+    body.turnstile,
+    c.req.header("cf-connecting-ip")
+  );
+  if (!human) return c.json({ error: "challenge_failed" }, 403);
+
+  const email = normalizeEmail(body.email);
+  const ip = c.req.header("cf-connecting-ip") ?? "unknown";
+  const subjects = [byAddress(ip), byEmail(email)];
+
+  if (await tooManyFailures(c.env, subjects)) {
+    return c.json({ error: "too_many_attempts" }, 429);
+  }
+
+  const member = await c.env.DB.prepare(
+    `SELECT m.id, m.shop_id, m.role, s.status, s.verified_at, cr.hash
+       FROM shop_members m
+       JOIN shops s ON s.id = m.shop_id
+       LEFT JOIN credentials cr
+              ON cr.owner_kind='shop_member' AND cr.owner_id=m.id
+             AND cr.kind='password'
+      WHERE m.email=?`
+  )
+    .bind(email)
+    .first<{
+      id: string;
+      shop_id: string;
+      role: "owner" | "staff";
+      status: string;
+      verified_at: string | null;
+      hash: string | null;
+    }>();
+
+  const ok = await verifySecret(body.password ?? "", member?.hash ?? ABSENT_ACCOUNT_HASH);
+  if (!member || !ok) {
+    await recordFailure(c.env, subjects);
+    return c.json({ error: "invalid_credentials" }, 403);
+  }
+  if (member.status === "banned") return c.json({ error: "account_closed" }, 403);
+
+  await clearFailures(c.env, subjects);
+
+  /* 確認待ちでも入れる。自分が今どの状態かを見せないと、
+     店舗は何を待っているのか分からない */
+  await startSession(c, {
+    kind: "shop",
+    shopId: member.shop_id,
+    memberId: member.id,
+    role: member.role,
+  });
+
+  return c.json({
+    shopId: member.shop_id,
+    role: member.role,
+    verified: Boolean(member.verified_at),
+    status: member.status,
+  });
+});
+
+/* 署名つきトークンなので、cookie を消しても期限までは有効なまま。
+   端末を渡す前提の運用をするなら、失効の記録を持つ必要がある */
+app.post("/api/auth/logout", (c) => {
+  setCookie(c, "akari", "", {
     httpOnly: true,
     secure: true,
     sameSite: "Lax",
     path: "/",
-    maxAge: 60 * 60 * 24 * 14,
+    maxAge: 0,
   });
+  return c.json({ ok: true });
+});
 
-  /* 登録した時点ではまだ何も見せない。KYC 通過まで応募も写真公開も不可 */
-  return c.json({ workerId: id, next: "kyc" });
+/* 画面が「今の自分」を確かめる口 */
+app.get("/api/me", async (c) => {
+  const s = c.get("session");
+  if (!s) return c.json({ session: null });
+
+  if (s.kind === "worker") {
+    const w = await c.env.DB.prepare(
+      `SELECT nickname, age_verified_at, status FROM workers WHERE id=?`
+    )
+      .bind(s.workerId)
+      .first<{ nickname: string; age_verified_at: string | null; status: string }>();
+    if (!w) return c.json({ session: null });
+
+    return c.json({
+      session: { kind: "worker", workerId: s.workerId },
+      nickname: w.nickname,
+      ageVerified: Boolean(w.age_verified_at),
+      status: w.status,
+    });
+  }
+
+  const shop = await c.env.DB.prepare(
+    `SELECT name, status, verified_at, response_rate FROM shops WHERE id=?`
+  )
+    .bind(s.shopId)
+    .first<{
+      name: string;
+      status: string;
+      verified_at: string | null;
+      response_rate: number | null;
+    }>();
+  if (!shop) return c.json({ session: null });
+
+  return c.json({
+    session: { kind: "shop", shopId: s.shopId, memberId: s.memberId, role: s.role },
+    name: shop.name,
+    status: shop.status,
+    verified: Boolean(shop.verified_at),
+    responseRate: shop.response_rate,
+  });
 });
 
 /* =====================================================================
@@ -246,6 +547,9 @@ app.post("/api/deals/apply", async (c) => {
 app.post("/api/deals/scout", async (c) => {
   const shop = requireShop(c);
   if (!shop) return c.json({ error: "unauthorized" }, 401);
+  /* 確認前の店舗に女性へ連絡させない */
+  if (!(await verifiedShop(c.env, shop.shopId)))
+    return c.json({ error: "shop_not_verified" }, 403);
 
   const { jobId, workerId, message } = await c.req.json<{
     jobId: string;
@@ -535,6 +839,10 @@ app.get("/img/:id", async (c) => {
 app.get("/api/workers/:id/photos", async (c) => {
   const shop = requireShop(c);
   if (!shop) return c.json({ error: "unauthorized" }, 401);
+  /* 写真の署名つき URL は、確認が済んだ店舗にしか出さない。
+     自己申告で登録できる以上、セッションは実在の証明にならない */
+  if (!(await verifiedShop(c.env, shop.shopId)))
+    return c.json({ error: "shop_not_verified" }, 403);
 
   /* 体入が成立している案件があるなら、非公開の写真も見せる */
   const visible = await c.env.DB.prepare(

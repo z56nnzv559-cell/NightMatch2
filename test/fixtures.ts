@@ -11,11 +11,14 @@ export type Fixture = {
   feePlanId: string;
 };
 
+/* 運営の確認が済んだ稼働中の店舗。確認前の状態を見たいテストは
+   登録のルート（/api/auth/shop/register）から作る */
 export async function seedShop(feePlanId = "plan_lounge_v1") {
   const shopId = uid("sh");
   await env.DB.prepare(
-    `INSERT INTO shops (id, name, area, business_type, fee_plan_id, billing_ref)
-     VALUES (?, ?, '福岡・中洲', 'ラウンジ', ?, ?)`
+    `INSERT INTO shops (id, name, area, business_type, fee_plan_id, billing_ref,
+                        status, verified_at)
+     VALUES (?, ?, '福岡・中洲', 'ラウンジ', ?, ?, 'active', datetime('now'))`
   )
     .bind(shopId, `店舗${shopId.slice(-4)}`, feePlanId, `cus_${shopId}`)
     .run();
