@@ -222,6 +222,21 @@ admin.post("/invoices/:id/send", async (c) => {
 
 /* ------------------------------------------------------- 店舗の確認 */
 
+/* 確認を待っている店舗。自己申告で登録できる以上、ここを見て
+   所在地と風営法の許可を確かめるまで、女性の情報には触れさせない */
+admin.get("/shops/pending", async (c) => {
+  const rows = await c.env.DB.prepare(
+    `SELECT s.id, s.name, s.area, s.business_type, s.station, s.created_at,
+            m.email AS owner_email
+       FROM shops s
+       LEFT JOIN shop_members m ON m.shop_id = s.id AND m.role = 'owner'
+      WHERE s.status = 'suspended' AND s.verified_at IS NULL
+      ORDER BY s.created_at
+      LIMIT 100`
+  ).all();
+  return c.json({ shops: rows.results });
+});
+
 admin.post("/shops/:id/verify", async (c) => {
   const actor = c.get("admin");
   const { licenseNo } = await c.req.json<{ licenseNo: string }>();
