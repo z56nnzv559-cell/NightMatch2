@@ -1,0 +1,17 @@
+# wrangler secret put で本番に入れる値のローカル版
+# このファイルは .gitignore に入れる（.dev.vars.example だけ commit する）
+
+JWT_SECRET="openssl rand -base64 48 で作る"
+IMG_SIGNING_KEY="openssl rand -base64 48 で作る"
+
+TURNSTILE_SECRET="Turnstile のシークレット"
+
+STRIPE_SECRET="sk_test_..."
+STRIPE_WEBHOOK_SECRET="whsec_..."
+
+PAYOUT_API_KEY="振込事業者の鍵"
+KYC_WEBHOOK_SECRET="KYC 事業者との共有シークレット"
+
+# Web Push。鍵の作り方は README を参照
+VAPID_PUBLIC_KEY="base64url の生の公開鍵"
+VAPID_PRIVATE_JWK='{"kty":"EC","crv":"P-256","d":"...","x":"...","y":"..."}'

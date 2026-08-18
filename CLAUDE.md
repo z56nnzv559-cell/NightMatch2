@@ -1,0 +1,160 @@
+# CLAUDE.md
+
+夜職の店舗と働く人をつなぐ、成果報酬型マッチング「灯 -AKARI-」。
+Cloudflare Workers 上で動く。日本語のサービスなので、UI 文言・コメント・
+コミットメッセージは日本語で書く。
+
+## コマンド
+
+```bash
+npm run dev:worker        # :8787  API（wrangler dev）
+npm run dev               # :5173  画面（/api を 8787 に転送）
+npm run db:migrate:local  # D1 をローカルに適用
+npm test                  # vitest（workerd の中で D1・DO・Workflows を本物で動かす）
+npm run typecheck
+npm run deploy            # vite build → wrangler deploy
+```
+
+デプロイと本番 D1 への migrate は実行しない。手順を提示して人に任せる。
+
+## 構成
+
+```
+src/index.ts          API（Hono）。ルートと権限判定だけ。業務ロジックは置かない
+src/deal-workflow.ts  案件1件 = Workflow 1インスタンス。成果の唯一の真実
+src/trial-code-do.ts  体入コードの照合と会話（Durable Objects）
+src/billing.ts        Stripe。請求は台帳から組む
+src/push.ts           Web Push（VAPID + aes128gcm、自前実装）
+src/photos.ts         写真。原本は非公開、派生のみ配信
+src/admin.ts          管理画面 API（Cloudflare Access の内側）
+src/consumers.ts      キュー消費と cron
+src/ledger.ts         台帳の読み方（何を請求できるか）の判定を1箇所に置く
+src/env.ts            型、JWT、署名、年齢判定、通知の宛先
+src/client/           画面（React + Vite、単一ファイルの App.jsx）
+migrations/           D1。連番で追加する。既存ファイルは編集しない
+test/                 vitest。金の経路と権限のテスト
+```
+
+## 破ってはいけない設計上の約束
+
+これらは好みではなく、破ると金銭事故か個人の安全に直結する。
+変更が必要だと判断したら、実装する前に理由を人に確認する。
+
+**1. 金額を書くのは台帳だけ**
+`ledger_entries` は append-only。`UPDATE` で状態を書き換えない。
+取消は負の額の `reversed` 行を積む。`accrued`（仮計上）と `confirmed`
+（確定）は別の行。請求書と振込は必ずこの表からしか作らない。
+一意索引 `idx_ledger_once` が二重計上を弾くので、挿入は `INSERT OR IGNORE`。
+
+取消には2つの意味がある。保証期間内の退店は**確定を経ずに仮計上を**
+取り消すので、これを値引きとして請求に載せてはいけない（請求していない
+金額を返すことになる）。請求済みの訂正だけが値引きになる。区別できるのは
+「同じ案件・相手・種類に確定行があるか」だけなので、判定は
+`src/ledger.ts` の1箇所に置く。請求書も店舗の画面もそこを通す。
+
+**2. 仕訳は Workflow の step の中だけで書く**
+`step.do` の外で `ledger_entries` に触らない。step の外はリトライで
+何度も走るため。API から直接仕訳を立てるコードを追加しない。
+
+**3. 成果は双方の報告が揃って初めて成立する**
+体入は6桁コードを店舗と本人の両方が報告し、`TrialCode` DO が照合して
+`trial.verified` を出す。定着は `shift_reports` に同じ日付が両側から
+来た日だけを1出勤として数える。片側の申告で成果を立てない。
+
+「双方」は**その案件の当事者**でなければ意味がない。案件を触るルートは
+必ず `dealOf()` を通して当事者だけに限る。ここが緩いと、無関係の利用者の
+申告が相手側の1件と揃って出勤日数になり、請求が立つ。
+
+**4. 写真の原本は絶対に外に出さない**
+R2 のバケットに公開ドメインを設定しない。配信は `/img/:id`（署名つき・
+寿命5分）のみ。`face_mode` が `eyes`（目線カット）のとき、原本からの
+自動生成をしない — 顔検出が外れると素顔が「目線カット」として出回る。
+本人が端末で帯を置いた画像を必須とし、無ければ 400 で拒否する。
+黙って `open` に落とすのは最悪の挙動。
+
+**5. 通知に本文を載せない**
+金額・店名・案件の内容を push payload に入れない。渡すのは
+テンプレートIDと案件IDだけ（`pushBodyFor`）。通知はロック画面に出るため、
+そこが身バレの経路になる。
+
+宛先は必ず `toWorker()` / `toShop()` / `ADMIN` で作る。生の ID を渡すと
+購読が引けず、通知が黙って消える。`Recipient` 型がこれを弾くので、
+`to:` に `string` を渡す形に緩めない。届かなかった重要通知は
+`notification_fallbacks` に残す。
+
+**6. 請求書は自動送付しない**
+cron は `draft` までしか進めない。`finalize` と `send` は管理画面から
+人が押す。送付前に台帳合計と `invoices.subtotal` を突き合わせ、
+ずれたら自動修正せず `ledger_mismatch` で止める。
+
+**7. 料金と閾値はコードでなくデータ**
+金額・保証出勤日数は `fee_plans` テーブル。案件は成立時点の
+`fee_plan_id` を握るので、改定は既存案件に遡らない。
+定数をコードに書き戻さない。
+
+**8. 年齢確認を通らない利用者に何もさせない**
+応募・スカウト対象・写真公開のすべてで `workers.age_verified_at` を
+確認する。自己申告の生年月日を信じず、KYC が返した値で再判定する。
+18歳以上かどうかだけでなく高校卒業年度も見る（`isEligibleAge`）。
+この判定を緩める変更は行わない。
+
+## D1 を触るときの注意
+
+- 課金がスキャンした行数ベースなので、新しい検索経路には必ず索引を張る。
+- こだわり条件は `job_perks` を join する。JSON への `LIKE` は全表走査。
+- 1DBあたり10GB上限。設計思想が水平分割なので、大きくなったら分ける。
+- マイグレーションは追記のみ。`0004_...sql` のように連番で足す。
+
+## 既知の落とし穴
+
+- `wrangler dev` では `waitForEvent` のタイムアウト後に後続の
+  `waitForEvent` がイベントを取り逃す不具合が報告されている（本番では
+  起きない）。ローカルで案件を通しで試すときはタイムアウトを跨がせない。
+- `step.do` のタイムアウトは30分以下。それより長い待ちは `waitForEvent`。
+- `step.do` の戻り値は 1MiB まで。
+- Images バインディングの `.input().transform()` は API が変わりやすい。
+  `photos.ts` を触る前に現行ドキュメントを確認する。
+- ハンドラは `export default {...}` に載せる。`export { queue }` の形は
+  Workers から拾われず、キュー消費と cron が黙って動かない。名前付きで
+  出せるのは DO と Workflow のクラスだけ（`satisfies ExportedHandler` で
+  形を縛っている）。
+- cron の指定は UTC。日本時間の月初に走らせたいものは「月末 19:00 UTC」に
+  なるので、cron 側では書けず、実行時に日本時間の日付を見て判断する。
+- SQLite の `date('now')` も UTC。台帳の締めのような境界は、日本時間の
+  月初を UTC の文字列に直してからバインドして比べる。
+- バインドの順番は SQL に現れる `?` の順番。`JOIN` は `WHERE` より前に
+  出るので、join の条件に使う値を先に積む。
+
+## テスト
+
+`npm test`。workerd の中で走らせ、D1・DO・Workflows は本物を使う。
+外に出る fetch（Stripe・振込・push）だけ差し替える。SQL の書き方そのものが
+仕様なので、SQLite は模造しない。
+
+- `deal-workflow.test.ts` 案件の4経路（無反応・体入のみ・取消・定着）で
+  台帳がどうなるか。`introspectWorkflowInstance` でイベントとタイムアウトを
+  作る
+- `invoice.test.ts` 請求の下書き。`invoices.subtotal` と印を付けた仕訳の
+  合計が必ず一致すること
+- `guarantee.test.ts` 両側から同じ日付が来た日だけを数えること
+- `authz.test.ts` 当事者以外が案件を進められないこと
+- `payout.test.ts` 台帳の確定額でしか振込まないこと
+- `notify.test.ts` 宛先の形と、届かなかった通知の控え
+- 新しく数字が動く経路を足したら、まず台帳のテストを足す
+
+## 未実装（着手候補）
+
+1. Service Worker（`push.ts` の受け側）
+2. `notification_fallbacks` を実際にメール送信する処理
+3. 管理画面の UI（API は実装済み）
+4. `photos.ts` のテスト（Images バインディングの差し替えが必要）
+
+## 未決の論点
+
+数字を動かす前に人に確認する。
+
+- 保証の出勤日数（既定14）。夜職の離職は最初の1〜2週に集中するため、
+  短いと店舗が損を感じ、長いと回収が遅れる
+- 体入報酬 ¥3,000 を取るか無料にするか。取ると冷やかし体入が減るが、
+  店舗の初回導入ハードルは上がる
+- 店舗の返信率の下限（既定50%）と、中抜け審査の閾値（既定4点）
