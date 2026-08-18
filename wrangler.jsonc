@@ -13,7 +13,7 @@
     {
       "binding": "DB",
       "database_name": "akari",
-      "database_id": "8f4673e1-ca5d-4f48-b92e-004e78189e2f"
+      "database_id": "<id>"
       // D1 は単一ロケーション。置き場所は作成時にしか決められないので、
       // ここではなく `wrangler d1 create akari --location apac` で指定する
       // （利用者が国内に集中するので東京寄りに置く）
@@ -34,7 +34,7 @@
   ],
 
   "kv_namespaces": [
-    { "binding": "CACHE", "id": "4f64fc0ec11c420ead07f9e65028190a" }
+    { "binding": "CACHE", "id": "<id>" }
   ],
 
   // 写真の派生を作る。原本は R2 に置いたまま、ここを通した結果だけ配信する

@@ -20,6 +20,18 @@ npm install
 npx wrangler login
 ```
 
+**Workers 有料プラン**が必要（Queues と Workflows が無料プランでは使えない）。
+
+さらに、以下3つはアカウント側でスイッチを入れる必要がある。CLI からは
+できないので、先にダッシュボードで有効化しておく。入れ忘れると
+`wrangler deploy` がバインディングの解決で止まる（コード側の問題ではない）。
+
+| 何を | どこで |
+|---|---|
+| R2 | ダッシュボード → R2 → 「R2 を有効にする」 |
+| Analytics Engine | ダッシュボード → Workers → Analytics Engine |
+| Images | ダッシュボード → Images |
+
 ### 1. D1
 
 ```bash
@@ -39,7 +51,8 @@ npx wrangler r2 bucket create akari-originals
 npx wrangler r2 bucket create akari-kyc
 
 # 身分証は判定後に消すが、取り漏らしの保険として保存期間を切る
-npx wrangler r2 bucket lifecycle add akari-kyc --expire-days 30 --prefix ""
+# （prefix は位置引数。省略すると全体が対象になる）
+npx wrangler r2 bucket lifecycle add akari-kyc purge-30d --expire-days 30
 
 npx wrangler queues create akari-notify
 npx wrangler queues create akari-payout
