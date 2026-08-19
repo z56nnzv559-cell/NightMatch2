@@ -22,10 +22,10 @@ function nonNegativeInteger(value: unknown) {
   return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
-function text(value: unknown, max: number, allowEmpty = false) {
+function text(value: unknown, max: number) {
   if (typeof value !== "string") return null;
   const v = value.trim();
-  if ((!allowEmpty && !v) || v.length > max) return null;
+  if (!v || v.length > max) return null;
   return v;
 }
 
@@ -35,6 +35,15 @@ function optionalText(value: unknown, max: number) {
   const v = value.trim();
   if (v.length > max) return { ok: false as const };
   return { ok: true as const, value: v || null };
+}
+
+function currentPerks(raw: string) {
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [] as string[];
+  }
 }
 
 type JobRow = {
@@ -89,8 +98,11 @@ export async function handlePatchJob(request: Request, env: Env, jobId: string) 
 
   let input: PatchJobInput;
   try {
-    input = await request.json<PatchJobInput>();
+    input = (await request.json()) as PatchJobInput;
   } catch {
+    return Response.json({ error: "invalid_json" }, { status: 400 });
+  }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
     return Response.json({ error: "invalid_json" }, { status: 400 });
   }
 
@@ -202,7 +214,7 @@ export async function handlePatchJob(request: Request, env: Env, jobId: string) 
     }
   }
 
-  const perksJson = JSON.stringify(perks ?? JSON.parse(current.perks || "[]"));
+  const perksJson = JSON.stringify(perks ?? currentPerks(current.perks));
   const statements = [
     env.DB.prepare(
       `UPDATE jobs
