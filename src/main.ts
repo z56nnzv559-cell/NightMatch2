@@ -32,6 +32,15 @@ async function verifiedShop(env: Env, shopId: string) {
   return Boolean(row);
 }
 
+async function dealForSession(env: Env, dealId: string, session: Session) {
+  return env.DB.prepare(
+    `SELECT id, worker_id, shop_id FROM deals
+      WHERE id=? AND ${session.kind === "worker" ? "worker_id=?" : "shop_id=?"}`
+  )
+    .bind(dealId, session.kind === "worker" ? session.workerId : session.shopId)
+    .first<{ id: string; worker_id: string; shop_id: string }>();
+}
+
 /* Analytics Engine は初期公開では任意。
    古いAPIが計測を呼んでも、本体機能まで500にしない。 */
 function envForCore(env: Env): Env {
@@ -59,6 +68,22 @@ function jsonStrings(raw: string | null) {
   } catch {
     return [] as string[];
   }
+}
+
+async function handleConversationSocket(request: Request, env: Env, dealId: string) {
+  const session = await sessionOf(request, env);
+  if (!session) return Response.json({ error: "unauthorized" }, { status: 401 });
+
+  const deal = await dealForSession(env, dealId, session);
+  if (!deal) return Response.json({ error: "not_found" }, { status: 404 });
+
+  const from = session.kind === "worker" ? `worker:${session.workerId}` : `shop:${session.shopId}`;
+  const headers = new Headers(request.headers);
+  headers.set("x-nightmatch-deal-id", dealId);
+  headers.set("x-nightmatch-sender", from);
+
+  const id = env.CONVERSATION.idFromName(dealId);
+  return env.CONVERSATION.get(id).fetch(new Request(request, { headers }));
 }
 
 async function handleWorkers(request: Request, env: Env) {
@@ -374,6 +399,10 @@ async function handleScout(request: Request, env: Env) {
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
+    const socket = url.pathname.match(/^\/api\/deals\/([^/]+)\/socket$/);
+    if (request.method === "GET" && socket) {
+      return handleConversationSocket(request, env, decodeURIComponent(socket[1]));
+    }
     if (request.method === "GET" && url.pathname === "/api/workers") {
       return handleWorkers(request, env);
     }
