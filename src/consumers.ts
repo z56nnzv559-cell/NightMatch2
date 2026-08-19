@@ -121,7 +121,7 @@ export async function deliverNotification(env: Env, msg: NotifyMessage) {
   if (!target) {
     /* 宛先の形が壊れている。届けようがないので、テンプレートの重要度を
        問わず控えに残す。黙って消えるのが一番悪い */
-    env.EVENTS.writeDataPoint({
+    env.EVENTS?.writeDataPoint({
       blobs: ["notify_bad_recipient", msg.template, msg.to],
       doubles: [0],
     });
@@ -131,7 +131,7 @@ export async function deliverNotification(env: Env, msg: NotifyMessage) {
 
   const delivered = await pushToRecipient(env, target, pushBodyFor(msg));
 
-  env.EVENTS.writeDataPoint({
+  env.EVENTS?.writeDataPoint({
     blobs: ["notify", msg.template, msg.to],
     doubles: [delivered],
   });
