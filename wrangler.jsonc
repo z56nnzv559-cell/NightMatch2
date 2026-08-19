@@ -1,6 +1,6 @@
 {
   "name": "nightmatch2",
-  "main": "src/app-entry.ts",
+  "main": "src/runtime-entry.ts",
   "compatibility_date": "2026-08-01",
   "compatibility_flags": ["nodejs_compat"],
 
