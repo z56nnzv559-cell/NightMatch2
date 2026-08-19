@@ -6,6 +6,7 @@ import {
   type Session,
   verifySession,
 } from "./env";
+import { handleWorkerFallbackAck, handleWorkerFallbackList } from "./fallback-inbox";
 import {
   handlePatchJob,
   readJobPauseReason,
@@ -152,6 +153,12 @@ export default {
     }
     if (request.method === "GET" && url.pathname === "/api/shop/jobs") {
       return handleShopJobs(request, env);
+    }
+    if (request.method === "GET" && url.pathname === "/api/me/fallback-notifications") {
+      return handleWorkerFallbackList(env, await sessionOf(request, env));
+    }
+    if (request.method === "POST" && url.pathname === "/api/me/fallback-notifications/ack") {
+      return handleWorkerFallbackAck(request, env, await sessionOf(request, env));
     }
 
     const shift = url.pathname.match(/^\/api\/deals\/([^/]+)\/shift$/);
