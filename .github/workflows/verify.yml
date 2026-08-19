@@ -1,0 +1,27 @@
+# 人と AI エージェントが交代で触るので、「動くと言った」ではなく
+# 「機械が通した」を残す。手元と同じ npm run verify をそのまま走らせる。
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      # 型 → テスト → ビルド → wrangler の設定検証
+      # テストは workerd の中で走り、D1・DO・Workflows は本物を使う
+      - run: npm run verify

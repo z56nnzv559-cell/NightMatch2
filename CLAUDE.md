@@ -12,10 +12,28 @@ npm run dev               # :5173  画面（/api を 8787 に転送）
 npm run db:migrate:local  # D1 をローカルに適用
 npm test                  # vitest（workerd の中で D1・DO・Workflows を本物で動かす）
 npm run typecheck
+npm run verify            # 型 → テスト → ビルド → wrangler の設定検証
 npm run deploy            # vite build → wrangler deploy
 ```
 
 デプロイと本番 D1 への migrate は実行しない。手順を提示して人に任せる。
+
+## 進め方
+
+人と AI エージェントが交代で触る。「動くと言った」ではなく「機械が通した」
+を残す。
+
+1. **issue を立ててから着手する。** 大きいものは sub-issue に割り、
+   1つの sub-issue = 1回の変更にする
+2. 実装する。数字が動く経路と権限の判定は、先にテストを書く
+3. `npm run verify` を通す。CI（`.github/workflows/verify.yml`）が
+   push と PR で同じものを走らせる
+4. PR で出す。テンプレートの申告欄を埋める。破ってはいけない約束に
+   触れた場合は、どれに・なぜを書く
+
+台帳・請求・権限・年齢確認は、壊れても画面上は静かに壊れる。
+実際にこのリポジトリでは、キュー消費と cron が動いていない不具合と、
+請求が永久に送れない不具合が、テストを書くまで誰にも見えていなかった。
 
 ## 構成
 

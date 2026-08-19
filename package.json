@@ -11,7 +11,8 @@
     "db:migrate": "wrangler d1 migrations apply akari --remote",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "verify": "npm run typecheck && npm test && npm run build && wrangler deploy --dry-run --outdir .wrangler/verify"
   },
   "dependencies": {
     "hono": "^4.6.14",

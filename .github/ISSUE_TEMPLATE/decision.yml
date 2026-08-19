@@ -1,0 +1,32 @@
+name: 決めること
+description: 実装の前に人が決める必要がある論点
+labels: [question]
+body:
+  - type: textarea
+    id: point
+    attributes:
+      label: 論点
+      description: 何を決める必要があるか
+    validations:
+      required: true
+
+  - type: textarea
+    id: options
+    attributes:
+      label: 選択肢
+      description: それぞれの得失。片方に寄せるなら理由も
+    validations:
+      required: true
+
+  - type: textarea
+    id: blocked
+    attributes:
+      label: 決まらないと何が止まるか
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        数字（保証の出勤日数・体入報酬・返信率の下限・中抜け審査の閾値）を
+        動かす話なら、実装より先にここで決める。

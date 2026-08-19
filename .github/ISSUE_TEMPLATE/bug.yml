@@ -1,0 +1,38 @@
+name: 不具合
+description: 動いていない、または静かに壊れている
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: 何が起きるか
+      description: 期待する動きと、実際の動き
+    validations:
+      required: true
+
+  - type: textarea
+    id: where
+    attributes:
+      label: どこ
+      description: ファイルと行（例 `src/consumers.ts:267`）
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: 何に響くか
+      options:
+        - 金（請求・振込・台帳）
+        - 個人の安全（身バレ・年齢確認・写真）
+        - 権限（当事者でない人が触れる）
+        - 運用が止まる
+        - 表示のずれ
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 再現の手順
+      description: テストで再現できるなら、その形で書く

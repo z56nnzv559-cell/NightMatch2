@@ -1,0 +1,33 @@
+name: 実装するもの
+description: 足りていない機能や経路
+labels: [enhancement]
+body:
+  - type: textarea
+    id: gap
+    attributes:
+      label: 何が無いか
+      description: それが無いと誰の何が止まるか
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: やること
+      description: 経路・エンドポイント・表の変更を箇条書きで
+    validations:
+      required: true
+
+  - type: textarea
+    id: verify
+    attributes:
+      label: 確かめること
+      description: テストで固定する振る舞い。金と権限が動くなら必ず書く
+    validations:
+      required: true
+
+  - type: textarea
+    id: undecided
+    attributes:
+      label: 未決の点
+      description: 人に決めてもらう必要があるもの（数字・方針）
