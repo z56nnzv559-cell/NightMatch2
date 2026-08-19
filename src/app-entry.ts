@@ -6,6 +6,7 @@ import {
   type Session,
   verifySession,
 } from "./env";
+import { handlePatchJob, reconcileJobPauses } from "./job-management";
 
 export type AppEnv = Env & { TURNSTILE_SITE_KEY?: string };
 
@@ -97,7 +98,7 @@ async function handleShopJobs(request: Request, env: AppEnv) {
 
   const rows = await env.DB.prepare(
     `SELECT id, area, business_type, trial_pay, hourly_min, hourly_max,
-            hours, perks, body, is_open, published_at
+            hours, perks, body, is_open, pause_reason, published_at
        FROM jobs
       WHERE shop_id=?
       ORDER BY published_at DESC
@@ -115,6 +116,7 @@ async function handleShopJobs(request: Request, env: AppEnv) {
       perks: string | null;
       body: string | null;
       is_open: number;
+      pause_reason: "manual" | "response_rate" | null;
       published_at: string;
     }>();
 
@@ -140,10 +142,29 @@ export default {
     if (request.method === "GET" && url.pathname === "/api/shop/jobs") {
       return handleShopJobs(request, env);
     }
+
+    const job = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
+    if (request.method === "PATCH" && job) {
+      return handlePatchJob(request, env, decodeURIComponent(job[1]));
+    }
+
     return app.fetch(request, env, ctx);
   },
   queue: app.queue,
-  scheduled: app.scheduled,
+  scheduled(event: ScheduledController, env: AppEnv, ctx: ExecutionContext) {
+    /* 既存cronの完了後にだけ、返信率由来の停止/復帰を整合させる。 */
+    const wrapped = new Proxy(ctx, {
+      get(target, prop, receiver) {
+        if (prop === "waitUntil") {
+          return (promise: Promise<unknown>) =>
+            target.waitUntil(Promise.resolve(promise).then(() => reconcileJobPauses(env)));
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as ExecutionContext;
+    return app.scheduled(event, env, wrapped);
+  },
 } satisfies ExportedHandler<AppEnv, NotifyMessage | PayoutMessage>;
 
 export { TrialCode, Conversation } from "./trial-code-do";
