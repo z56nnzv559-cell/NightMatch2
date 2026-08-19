@@ -104,7 +104,7 @@ export async function finalizeInvoice(env: Env, invoiceId: string, actor: string
       customer: inv.billing_ref,
       collection_method: "charge_automatically",
       auto_advance: "false",
-      description: `灯 成果報酬 ${inv.period}`,
+      description: `NightMatch 成果報酬 ${inv.period}`,
       "metadata[invoice_id]": invoiceId,
     },
     `inv_${invoiceId}`
