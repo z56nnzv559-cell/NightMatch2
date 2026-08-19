@@ -31,6 +31,20 @@ async function verifiedShop(env: Env, shopId: string) {
   return Boolean(row);
 }
 
+/* Analytics Engine は初期公開では任意。
+   古いAPIが計測を呼んでも、本体機能まで500にしない。 */
+function envForCore(env: Env): Env {
+  if (env.EVENTS) return env;
+  return new Proxy(env, {
+    get(target, prop, receiver) {
+      if (prop === "EVENTS") {
+        return { writeDataPoint() {} } as AnalyticsEngineDataset;
+      }
+      return Reflect.get(target as object, prop, receiver);
+    },
+  });
+}
+
 async function handleScout(request: Request, env: Env) {
   const session = await sessionOf(request, env);
   if (!session || session.kind !== "shop") {
@@ -141,7 +155,7 @@ export default {
     if (request.method === "POST" && url.pathname === "/api/deals/scout") {
       return handleScout(request, env);
     }
-    return core.fetch(request, env, ctx);
+    return core.fetch(request, envForCore(env), ctx);
   },
   queue: core.queue,
   scheduled: core.scheduled,
