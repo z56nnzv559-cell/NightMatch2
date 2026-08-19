@@ -74,9 +74,7 @@ config.kv_namespaces = [{ binding: "CACHE", id: cache.id }];
 fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
 console.log(`Bound CACHE to existing KV namespace ${cache.title} (${cache.id})`);
 
-// D1: the Git-connected deploy previously created/bound the database but did
-// not apply the schema migrations. Apply all pending migrations before
-// wrangler deploy so the production Worker never runs against an empty DB.
-console.log("Applying pending D1 migrations to akari...");
-run(["d1", "migrations", "apply", "akari", "--remote"]);
-console.log("D1 migrations are up to date");
+// D1 schema is initialized/updated by the Worker through its DB binding at
+// runtime. Keeping it out of the build step means the standard Workers Builds
+// token does not need extra D1 API permissions and cannot block deployment.
+console.log("D1 schema will be verified by the NightMatch Worker at runtime");
