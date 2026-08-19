@@ -12,6 +12,7 @@ import {
   reconcileJobPauses,
   snapshotOpenJobIds,
 } from "./job-management";
+import { handleKycWebhook } from "./kyc";
 
 export type AppEnv = Env & { TURNSTILE_SITE_KEY?: string };
 
@@ -139,6 +140,9 @@ export default {
   async fetch(request: Request, env: AppEnv, ctx: ExecutionContext) {
     const url = new URL(request.url);
 
+    if (request.method === "POST" && url.pathname === "/hooks/kyc") {
+      return handleKycWebhook(env, request);
+    }
     if (request.method === "GET" && url.pathname === "/api/config") {
       return Response.json({ turnstileSiteKey: env.TURNSTILE_SITE_KEY ?? "" });
     }
