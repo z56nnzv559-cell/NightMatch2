@@ -13,6 +13,7 @@ import {
   snapshotOpenJobIds,
 } from "./job-management";
 import { handleKycWebhook } from "./kyc";
+import { handleSafeShiftReport } from "./reference-integrity";
 
 export type AppEnv = Env & { TURNSTILE_SITE_KEY?: string };
 
@@ -151,6 +152,16 @@ export default {
     }
     if (request.method === "GET" && url.pathname === "/api/shop/jobs") {
       return handleShopJobs(request, env);
+    }
+
+    const shift = url.pathname.match(/^\/api\/deals\/([^/]+)\/shift$/);
+    if (request.method === "POST" && shift) {
+      return handleSafeShiftReport(
+        request,
+        env,
+        decodeURIComponent(shift[1]),
+        await sessionOf(request, env)
+      );
     }
 
     const job = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
