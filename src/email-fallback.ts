@@ -1,12 +1,5 @@
 import type { Env } from "./env";
 
-type EmailEnv = Env & {
-  EMAIL_ACCOUNT_ID?: string;
-  EMAIL_API_TOKEN?: string;
-  EMAIL_FROM?: string;
-  EMAIL_ADMIN_TO?: string;
-};
-
 type PendingFallback = {
   id: string;
   recipient: string;
@@ -17,8 +10,9 @@ type PendingFallback = {
 const SAFE_SUBJECT = "NightMatch：重要なお知らせ";
 const SAFE_TEXT =
   "NightMatchに重要なお知らせがあります。金額・相手の名称・メッセージ内容などの詳細はメールには記載していません。NightMatchへログインしてご確認ください。";
+const CLAIM_TTL_MINUTES = 15;
 
-function configured(env: EmailEnv) {
+function configured(env: Env) {
   return Boolean(
     env.EMAIL_ACCOUNT_ID?.trim() &&
       env.EMAIL_API_TOKEN?.trim() &&
@@ -26,7 +20,7 @@ function configured(env: EmailEnv) {
   );
 }
 
-async function destination(env: EmailEnv, recipient: string) {
+async function destination(env: Env, recipient: string) {
   if (recipient === "admin") {
     return env.EMAIL_ADMIN_TO?.trim() || null;
   }
@@ -44,7 +38,42 @@ async function destination(env: EmailEnv, recipient: string) {
   return owner?.email?.trim() || null;
 }
 
-async function sendCloudflareEmail(env: EmailEnv, to: string) {
+async function claimFallback(env: Env, id: string) {
+  const claimed = await env.DB.prepare(
+    `UPDATE notification_fallbacks
+        SET email_claimed_at=datetime('now')
+      WHERE id=? AND sent_at IS NULL
+        AND (
+          email_claimed_at IS NULL OR
+          email_claimed_at < datetime('now', ?)
+        )`
+  )
+    .bind(id, `-${CLAIM_TTL_MINUTES} minutes`)
+    .run();
+  return (claimed.meta.changes ?? 0) > 0;
+}
+
+async function releaseClaim(env: Env, id: string) {
+  await env.DB.prepare(
+    `UPDATE notification_fallbacks
+        SET email_claimed_at=NULL
+      WHERE id=? AND sent_at IS NULL`
+  )
+    .bind(id)
+    .run();
+}
+
+async function markSent(env: Env, id: string) {
+  await env.DB.prepare(
+    `UPDATE notification_fallbacks
+        SET sent_at=datetime('now'), email_claimed_at=NULL
+      WHERE id=? AND sent_at IS NULL`
+  )
+    .bind(id)
+    .run();
+}
+
+async function sendCloudflareEmail(env: Env, to: string) {
   const res = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(
       env.EMAIL_ACCOUNT_ID!.trim()
@@ -73,23 +102,27 @@ async function sendCloudflareEmail(env: EmailEnv, to: string) {
 }
 
 export async function trySendFallbackEmail(env: Env, row: PendingFallback) {
-  const emailEnv = env as EmailEnv;
-
   /* 本人には連絡先を持たせない。#45 の次回ログイン表示だけを使う。 */
   if (row.recipient.startsWith("worker:")) return { status: "worker_in_app" as const };
 
-  if (!configured(emailEnv)) return { status: "not_configured" as const };
-  const to = await destination(emailEnv, row.recipient);
+  if (!configured(env)) return { status: "not_configured" as const };
+  const to = await destination(env, row.recipient);
   if (!to) return { status: "no_destination" as const };
 
-  await sendCloudflareEmail(emailEnv, to);
-  await env.DB.prepare(
-    `UPDATE notification_fallbacks SET sent_at=datetime('now')
-      WHERE id=? AND sent_at IS NULL`
-  )
-    .bind(row.id)
-    .run();
-  return { status: "sent" as const };
+  /* queue直後とcronが同時に拾っても1通にする。古いclaimは再利用できる。 */
+  if (!(await claimFallback(env, row.id))) {
+    return { status: "already_claimed" as const };
+  }
+
+  try {
+    await sendCloudflareEmail(env, to);
+    await markSent(env, row.id);
+    return { status: "sent" as const };
+  } catch (error) {
+    /* 一時障害なら次回のflushで再送できるようclaimを戻す。 */
+    await releaseClaim(env, row.id).catch(() => {});
+    throw error;
+  }
 }
 
 /*
@@ -102,10 +135,14 @@ export async function flushFallbackEmails(env: Env, limit = 50) {
        FROM notification_fallbacks
       WHERE sent_at IS NULL
         AND (recipient='admin' OR recipient LIKE 'shop:%')
+        AND (
+          email_claimed_at IS NULL OR
+          email_claimed_at < datetime('now', ?)
+        )
       ORDER BY created_at ASC
       LIMIT ?`
   )
-    .bind(Math.min(Math.max(limit, 1), 100))
+    .bind(`-${CLAIM_TTL_MINUTES} minutes`, Math.min(Math.max(limit, 1), 100))
     .all<PendingFallback>();
 
   let sent = 0;
