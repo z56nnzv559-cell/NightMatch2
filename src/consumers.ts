@@ -55,31 +55,74 @@ export async function sendPayout(env: Env, msg: PayoutMessage) {
     throw new Error(`celebration not confirmed yet: ${msg.dealId} ${msg.kind}`);
   }
 
-  /* 中抜けの疑いが濃い案件は、確認が終わるまで止める */
+  /* 人が cleared と判断した案件は、同じ中抜け点数だけでは再保留しない。
+     ただし台帳不一致は別事故なので必ず止め直す。 */
   const risk = await env.DB.prepare(
-    `SELECT COALESCE(SUM(weight),0) AS score FROM bypass_signals WHERE deal_id=?`
+    `SELECT COALESCE(SUM(b.weight),0) AS score,
+            (SELECT status FROM review_cases r WHERE r.deal_id=? LIMIT 1) AS review_status
+       FROM bypass_signals b
+      WHERE b.deal_id=?`
   )
-    .bind(msg.dealId)
-    .first<{ score: number }>();
+    .bind(msg.dealId, msg.dealId)
+    .first<{ score: number; review_status: string | null }>();
 
   const mismatch = entry.amount !== msg.amount;
-  const held = mismatch || (risk?.score ?? 0) >= 4;
+  const bypassHeld = (risk?.score ?? 0) >= 4 && risk?.review_status !== "cleared";
+  const held = mismatch || bypassHeld;
+  const holdReason = mismatch ? "ledger_mismatch" : bypassHeld ? "bypass_review" : null;
+
+  if (mismatch) {
+    /* 台帳不一致にも人が判断できる審査ケースを必ず作る。
+       以前 cleared だった案件で新たに不一致が出た場合は再度 open に戻す。 */
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO review_cases (id, deal_id, reason, score, status)
+       VALUES (?, ?, 'ledger_mismatch', 0, 'open')`
+    )
+      .bind(`rc_payout_${msg.dealId}`, msg.dealId)
+      .run();
+    await env.DB.prepare(
+      `UPDATE review_cases
+          SET reason='ledger_mismatch', status='open', score=0,
+              resolved_by=NULL, resolved_at=NULL, note=NULL
+        WHERE deal_id=? AND status!='open'`
+    )
+      .bind(msg.dealId)
+      .run();
+  }
 
   const ins = await env.DB.prepare(
-    `INSERT OR IGNORE INTO payouts (id, worker_id, amount, status, hold_reason)
-     VALUES (?, ?, ?, ?, ?)`
+    `INSERT OR IGNORE INTO payouts
+       (id, worker_id, amount, status, hold_reason, deal_id, kind)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       payoutId,
       msg.workerId,
       entry.amount,
       held ? "held" : "queued",
-      mismatch ? "ledger_mismatch" : held ? "bypass_review" : null
+      holdReason,
+      msg.dealId,
+      msg.kind
     )
     .run();
 
-  if (ins.meta.changes === 0) return; /* 既に出している */
+  const payout = await env.DB.prepare(
+    `SELECT status, external_ref FROM payouts WHERE id=?`
+  )
+    .bind(payoutId)
+    .first<{ status: string; external_ref: string | null }>();
+
+  if (!payout) throw new Error(`payout row missing: ${payoutId}`);
+  if (payout.status === "sent" || payout.external_ref) return;
+
   if (held) {
+    if (payout.status !== "held" || ins.meta.changes > 0) {
+      await env.DB.prepare(
+        `UPDATE payouts SET status='held', hold_reason=? WHERE id=? AND external_ref IS NULL`
+      )
+        .bind(holdReason, payoutId)
+        .run();
+    }
     await env.NOTIFY.send({
       to: ADMIN,
       template: "payout.held",
@@ -87,6 +130,9 @@ export async function sendPayout(env: Env, msg: PayoutMessage) {
     });
     return;
   }
+
+  /* cleared 後の再送では行は既に存在する。queued の既存行もここから送る。 */
+  if (payout.status === "held") return;
 
   const res = await fetch("https://payout.example.jp/v1/transfers", {
     method: "POST",
@@ -102,7 +148,7 @@ export async function sendPayout(env: Env, msg: PayoutMessage) {
 
   const { id } = await res.json<{ id: string }>();
   await env.DB.prepare(
-    `UPDATE payouts SET status='sent', external_ref=? WHERE id=?`
+    `UPDATE payouts SET status='sent', external_ref=?, hold_reason=NULL WHERE id=?`
   )
     .bind(id, payoutId)
     .run();
