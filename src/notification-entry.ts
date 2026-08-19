@@ -1,4 +1,5 @@
-import app, { type AppEnv } from "./runtime-entry";
+import app from "./runtime-entry";
+import type { AppEnv } from "./app-entry";
 import type { NotifyMessage, PayoutMessage } from "./env";
 import {
   handleAdminFallbackList,
