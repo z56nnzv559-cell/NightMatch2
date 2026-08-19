@@ -14,6 +14,10 @@ import {
 } from "./job-management";
 import { handleKycWebhook } from "./kyc";
 import { handleSafeShiftReport } from "./reference-integrity";
+import {
+  handleAcknowledgeWorkerFallback,
+  handleWorkerFallbacks,
+} from "./fallback-notices";
 
 export type AppEnv = Env & { TURNSTILE_SITE_KEY?: string };
 
@@ -152,6 +156,18 @@ export default {
     }
     if (request.method === "GET" && url.pathname === "/api/shop/jobs") {
       return handleShopJobs(request, env);
+    }
+    if (request.method === "GET" && url.pathname === "/api/me/fallbacks") {
+      return handleWorkerFallbacks(env, await sessionOf(request, env));
+    }
+
+    const fallback = url.pathname.match(/^\/api\/me\/fallbacks\/([^/]+)\/ack$/);
+    if (request.method === "POST" && fallback) {
+      return handleAcknowledgeWorkerFallback(
+        env,
+        await sessionOf(request, env),
+        decodeURIComponent(fallback[1])
+      );
     }
 
     const shift = url.pathname.match(/^\/api\/deals\/([^/]+)\/shift$/);
