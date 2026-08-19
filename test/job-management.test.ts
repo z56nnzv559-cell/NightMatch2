@@ -1,7 +1,7 @@
 import { SELF, env } from "cloudflare:test";
 import { expect, it } from "vitest";
 import { signSession, type Session } from "../src/env";
-import { reconcileJobPauses } from "../src/job-management";
+import { readJobPauseReason, reconcileJobPauses } from "../src/job-management";
 import { seedJob, seedShop } from "./fixtures";
 
 async function cookieFor(session: Session) {
@@ -82,73 +82,89 @@ it("店舗が自分で停止した求人は自分で再開できる", async () =
   const jobId = await seedJob(shopId);
 
   expect((await patch(jobId, shopId, { isOpen: false })).status).toBe(200);
-  let row = await env.DB.prepare(`SELECT is_open, pause_reason FROM jobs WHERE id=?`)
+  let row = await env.DB.prepare(`SELECT is_open FROM jobs WHERE id=?`)
     .bind(jobId)
-    .first<{ is_open: number; pause_reason: string | null }>();
-  expect(row).toEqual({ is_open: 0, pause_reason: "manual" });
+    .first<{ is_open: number }>();
+  expect(row).toEqual({ is_open: 0 });
+  expect(await readJobPauseReason(env, jobId)).toBe("manual");
 
   expect((await patch(jobId, shopId, { isOpen: true })).status).toBe(200);
-  row = await env.DB.prepare(`SELECT is_open, pause_reason FROM jobs WHERE id=?`)
+  row = await env.DB.prepare(`SELECT is_open FROM jobs WHERE id=?`)
     .bind(jobId)
-    .first<{ is_open: number; pause_reason: string | null }>();
-  expect(row).toEqual({ is_open: 1, pause_reason: null });
+    .first<{ is_open: number }>();
+  expect(row).toEqual({ is_open: 1 });
+  expect(await readJobPauseReason(env, jobId)).toBeNull();
 });
 
 it("返信率による自動停止を店舗が勝手に再開できない", async () => {
   const shopId = await seedShop();
   const jobId = await seedJob(shopId);
-  await env.DB.prepare(
-    `UPDATE jobs SET is_open=0, pause_reason='response_rate' WHERE id=?`
-  )
-    .bind(jobId)
-    .run();
+  await env.DB.prepare(`UPDATE jobs SET is_open=0 WHERE id=?`).bind(jobId).run();
+  await env.CACHE.put(`job-pause:${jobId}`, "response_rate");
 
   const res = await patch(jobId, shopId, { isOpen: true });
   expect(res.status).toBe(409);
   expect(await res.json()).toMatchObject({ error: "response_rate_pause" });
 
-  const row = await env.DB.prepare(`SELECT is_open, pause_reason FROM jobs WHERE id=?`)
+  const row = await env.DB.prepare(`SELECT is_open FROM jobs WHERE id=?`)
     .bind(jobId)
-    .first<{ is_open: number; pause_reason: string | null }>();
-  expect(row).toEqual({ is_open: 0, pause_reason: "response_rate" });
+    .first<{ is_open: number }>();
+  expect(row).toEqual({ is_open: 0 });
+  expect(await readJobPauseReason(env, jobId)).toBe("response_rate");
 });
 
-it("返信率で閉じた求人に自動停止の理由を付け、5割以上に戻れば自動復帰する", async () => {
+it("cron前に掲載中だった求人だけを返信率停止と判定し、5割以上で自動復帰する", async () => {
   const shopId = await seedShop();
   const jobId = await seedJob(shopId);
+  const openBefore = new Set([jobId]);
 
   await env.DB.prepare(`UPDATE shops SET response_rate=0.4 WHERE id=?`).bind(shopId).run();
-  await env.DB.prepare(`UPDATE jobs SET is_open=0, pause_reason=NULL WHERE id=?`)
-    .bind(jobId)
-    .run();
-  await reconcileJobPauses(env);
+  await env.DB.prepare(`UPDATE jobs SET is_open=0 WHERE id=?`).bind(jobId).run();
+  await reconcileJobPauses(env, openBefore);
 
-  let row = await env.DB.prepare(`SELECT is_open, pause_reason FROM jobs WHERE id=?`)
+  let row = await env.DB.prepare(`SELECT is_open FROM jobs WHERE id=?`)
     .bind(jobId)
-    .first<{ is_open: number; pause_reason: string | null }>();
-  expect(row).toEqual({ is_open: 0, pause_reason: "response_rate" });
+    .first<{ is_open: number }>();
+  expect(row).toEqual({ is_open: 0 });
+  expect(await readJobPauseReason(env, jobId)).toBe("response_rate");
 
   await env.DB.prepare(`UPDATE shops SET response_rate=0.8 WHERE id=?`).bind(shopId).run();
-  await reconcileJobPauses(env);
+  await reconcileJobPauses(env, new Set());
 
-  row = await env.DB.prepare(`SELECT is_open, pause_reason FROM jobs WHERE id=?`)
+  row = await env.DB.prepare(`SELECT is_open FROM jobs WHERE id=?`)
     .bind(jobId)
-    .first<{ is_open: number; pause_reason: string | null }>();
-  expect(row).toEqual({ is_open: 1, pause_reason: null });
+    .first<{ is_open: number }>();
+  expect(row).toEqual({ is_open: 1 });
+  expect(await readJobPauseReason(env, jobId)).toBeNull();
 });
 
 it("返信率が回復しても手動停止した求人は勝手に開かない", async () => {
   const shopId = await seedShop();
   const jobId = await seedJob(shopId);
   await env.DB.prepare(`UPDATE shops SET response_rate=0.9 WHERE id=?`).bind(shopId).run();
-  await env.DB.prepare(`UPDATE jobs SET is_open=0, pause_reason='manual' WHERE id=?`)
-    .bind(jobId)
-    .run();
+  await env.DB.prepare(`UPDATE jobs SET is_open=0 WHERE id=?`).bind(jobId).run();
+  await env.CACHE.put(`job-pause:${jobId}`, "manual");
 
-  await reconcileJobPauses(env);
+  await reconcileJobPauses(env, new Set());
 
-  const row = await env.DB.prepare(`SELECT is_open, pause_reason FROM jobs WHERE id=?`)
+  const row = await env.DB.prepare(`SELECT is_open FROM jobs WHERE id=?`)
     .bind(jobId)
-    .first<{ is_open: number; pause_reason: string | null }>();
-  expect(row).toEqual({ is_open: 0, pause_reason: "manual" });
+    .first<{ is_open: number }>();
+  expect(row).toEqual({ is_open: 0 });
+  expect(await readJobPauseReason(env, jobId)).toBe("manual");
+});
+
+it("以前から停止中でKV理由が無い求人を自動停止と誤認しない", async () => {
+  const shopId = await seedShop();
+  const jobId = await seedJob(shopId);
+  await env.DB.prepare(`UPDATE shops SET response_rate=0.3 WHERE id=?`).bind(shopId).run();
+  await env.DB.prepare(`UPDATE jobs SET is_open=0 WHERE id=?`).bind(jobId).run();
+
+  await reconcileJobPauses(env, new Set());
+
+  expect(await readJobPauseReason(env, jobId)).toBeNull();
+  const row = await env.DB.prepare(`SELECT is_open FROM jobs WHERE id=?`)
+    .bind(jobId)
+    .first<{ is_open: number }>();
+  expect(row).toEqual({ is_open: 0 });
 });

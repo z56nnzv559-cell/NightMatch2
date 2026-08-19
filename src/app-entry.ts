@@ -6,7 +6,12 @@ import {
   type Session,
   verifySession,
 } from "./env";
-import { handlePatchJob, reconcileJobPauses } from "./job-management";
+import {
+  handlePatchJob,
+  readJobPauseReason,
+  reconcileJobPauses,
+  snapshotOpenJobIds,
+} from "./job-management";
 
 export type AppEnv = Env & { TURNSTILE_SITE_KEY?: string };
 
@@ -98,7 +103,7 @@ async function handleShopJobs(request: Request, env: AppEnv) {
 
   const rows = await env.DB.prepare(
     `SELECT id, area, business_type, trial_pay, hourly_min, hourly_max,
-            hours, perks, body, is_open, pause_reason, published_at
+            hours, perks, body, is_open, published_at
        FROM jobs
       WHERE shop_id=?
       ORDER BY published_at DESC
@@ -116,17 +121,18 @@ async function handleShopJobs(request: Request, env: AppEnv) {
       perks: string | null;
       body: string | null;
       is_open: number;
-      pause_reason: "manual" | "response_rate" | null;
       published_at: string;
     }>();
 
-  return Response.json({
-    jobs: rows.results.map((job) => ({
+  const jobs = await Promise.all(
+    rows.results.map(async (job) => ({
       ...job,
       perks: parseStringList(job.perks),
       is_open: Boolean(job.is_open),
-    })),
-  });
+      pause_reason: await readJobPauseReason(env, job.id),
+    }))
+  );
+  return Response.json({ jobs });
 }
 
 export default {
@@ -152,12 +158,20 @@ export default {
   },
   queue: app.queue,
   scheduled(event: ScheduledController, env: AppEnv, ctx: ExecutionContext) {
-    /* 既存cronの完了後にだけ、返信率由来の停止/復帰を整合させる。 */
+    /*
+     * cron前に掲載中求人を記録する。既存cronが閉じた後にだけ比較することで、
+     * 過去の手動停止を返信率停止と誤認しない。
+     */
+    const openBefore = snapshotOpenJobIds(env);
     const wrapped = new Proxy(ctx, {
       get(target, prop, receiver) {
         if (prop === "waitUntil") {
           return (promise: Promise<unknown>) =>
-            target.waitUntil(Promise.resolve(promise).then(() => reconcileJobPauses(env)));
+            target.waitUntil(
+              Promise.all([openBefore, Promise.resolve(promise)]).then(([snapshot]) =>
+                reconcileJobPauses(env, snapshot)
+              )
+            );
         }
         const value = Reflect.get(target, prop, receiver);
         return typeof value === "function" ? value.bind(target) : value;

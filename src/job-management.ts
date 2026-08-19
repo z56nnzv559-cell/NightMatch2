@@ -46,6 +46,14 @@ function currentPerks(raw: string) {
   }
 }
 
+export type JobPauseReason = "manual" | "response_rate" | null;
+const pauseKey = (jobId: string) => `job-pause:${jobId}`;
+
+export async function readJobPauseReason(env: Env, jobId: string): Promise<JobPauseReason> {
+  const value = await env.CACHE.get(pauseKey(jobId));
+  return value === "manual" || value === "response_rate" ? value : null;
+}
+
 type JobRow = {
   id: string;
   shop_id: string;
@@ -58,7 +66,6 @@ type JobRow = {
   perks: string;
   body: string | null;
   is_open: number;
-  pause_reason: "manual" | "response_rate" | null;
 };
 
 type PatchJobInput = {
@@ -89,7 +96,7 @@ export async function handlePatchJob(request: Request, env: Env, jobId: string) 
 
   const current = await env.DB.prepare(
     `SELECT id, shop_id, area, business_type, trial_pay, hourly_min, hourly_max,
-            hours, perks, body, is_open, pause_reason
+            hours, perks, body, is_open
        FROM jobs WHERE id=? AND shop_id=?`
   )
     .bind(jobId, session.shopId)
@@ -129,7 +136,8 @@ export async function handlePatchJob(request: Request, env: Env, jobId: string) 
   let hours = current.hours;
   let body = current.body;
   let isOpen = current.is_open;
-  let pauseReason = current.pause_reason;
+  let pauseReason = await readJobPauseReason(env, jobId);
+  let pauseAction: JobPauseReason | "clear" | undefined;
 
   if (own(input, "area")) {
     const v = text(input.area, 100);
@@ -196,7 +204,7 @@ export async function handlePatchJob(request: Request, env: Env, jobId: string) 
     if (typeof input.isOpen !== "boolean") {
       return Response.json({ error: "invalid_is_open" }, { status: 400 });
     }
-    if (input.isOpen && current.pause_reason === "response_rate") {
+    if (input.isOpen && pauseReason === "response_rate") {
       return Response.json(
         {
           error: "response_rate_pause",
@@ -208,9 +216,11 @@ export async function handlePatchJob(request: Request, env: Env, jobId: string) 
     if (input.isOpen) {
       isOpen = 1;
       pauseReason = null;
+      pauseAction = "clear";
     } else {
       isOpen = 0;
       pauseReason = "manual";
+      pauseAction = "manual";
     }
   }
 
@@ -219,7 +229,7 @@ export async function handlePatchJob(request: Request, env: Env, jobId: string) 
     env.DB.prepare(
       `UPDATE jobs
           SET area=?, business_type=?, trial_pay=?, hourly_min=?, hourly_max=?,
-              hours=?, perks=?, body=?, is_open=?, pause_reason=?
+              hours=?, perks=?, body=?, is_open=?
         WHERE id=? AND shop_id=?`
     ).bind(
       area,
@@ -231,7 +241,6 @@ export async function handlePatchJob(request: Request, env: Env, jobId: string) 
       perksJson,
       body,
       isOpen,
-      pauseReason,
       jobId,
       session.shopId
     ),
@@ -247,53 +256,63 @@ export async function handlePatchJob(request: Request, env: Env, jobId: string) 
   }
 
   await env.DB.batch(statements);
-  return Response.json({
-    jobId,
-    isOpen: Boolean(isOpen),
-    pauseReason,
-  });
+  if (pauseAction === "clear") {
+    await env.CACHE.delete(pauseKey(jobId));
+  } else if (pauseAction === "manual") {
+    await env.CACHE.put(pauseKey(jobId), "manual");
+  }
+
+  return Response.json({ jobId, isOpen: Boolean(isOpen), pauseReason });
+}
+
+export async function snapshotOpenJobIds(env: Env) {
+  const rows = await env.DB.prepare(`SELECT id FROM jobs WHERE is_open=1`).all<{ id: string }>();
+  return new Set(rows.results.map((row) => row.id));
 }
 
 /*
- * 既存のcronは返信率が5割未満の店舗について is_open=0 にする。
- * その直後に呼び、停止理由を記録する。返信率が回復した店舗では
- * response_rate 由来の停止だけを戻し、manual は絶対に触らない。
+ * 既存cronが返信率5割未満の店舗を閉じる前に open job の集合を取る。
+ * cron後に「以前openだったのに閉じた」求人だけ response_rate と判定するため、
+ * 過去の手動停止を誤って自動復帰させない。
  */
-export async function reconcileJobPauses(env: Env) {
-  await env.DB.prepare(
-    `UPDATE jobs
-        SET pause_reason='response_rate'
-      WHERE is_open=0 AND pause_reason IS NULL
-        AND shop_id IN (
-          SELECT id FROM shops WHERE response_rate IS NOT NULL AND response_rate < 0.5
-        )`
-  ).run();
+export async function reconcileJobPauses(env: Env, openBefore: Set<string>) {
+  const closed = await env.DB.prepare(
+    `SELECT j.id, j.shop_id, s.response_rate
+       FROM jobs j JOIN shops s ON s.id=j.shop_id
+      WHERE j.is_open=0 AND s.response_rate IS NOT NULL`
+  ).all<{ id: string; shop_id: string; response_rate: number }>();
 
-  const recovered = await env.DB.prepare(
-    `SELECT DISTINCT shop_id FROM jobs
-      WHERE is_open=0 AND pause_reason='response_rate'
-        AND shop_id IN (
-          SELECT id FROM shops WHERE response_rate IS NOT NULL AND response_rate >= 0.5
-        )`
-  ).all<{ shop_id: string }>();
+  const resume: { id: string; shopId: string }[] = [];
+  const resumedShops = new Set<string>();
 
-  if (recovered.results.length === 0) return { resumedShops: 0 };
+  for (const job of closed.results) {
+    let reason = await readJobPauseReason(env, job.id);
 
-  await env.DB.prepare(
-    `UPDATE jobs
-        SET is_open=1, pause_reason=NULL
-      WHERE is_open=0 AND pause_reason='response_rate'
-        AND shop_id IN (
-          SELECT id FROM shops WHERE response_rate IS NOT NULL AND response_rate >= 0.5
-        )`
-  ).run();
+    if (!reason && openBefore.has(job.id) && job.response_rate < 0.5) {
+      reason = "response_rate";
+      await env.CACHE.put(pauseKey(job.id), reason);
+    }
 
-  for (const row of recovered.results) {
-    await env.NOTIFY.send({
-      to: toShop(row.shop_id),
-      template: "shop.listing_resumed",
-    });
+    if (reason === "response_rate" && job.response_rate >= 0.5) {
+      resume.push({ id: job.id, shopId: job.shop_id });
+    }
   }
 
-  return { resumedShops: recovered.results.length };
+  if (resume.length > 0) {
+    await env.DB.batch(
+      resume.map((job) =>
+        env.DB.prepare(`UPDATE jobs SET is_open=1 WHERE id=? AND is_open=0`).bind(job.id)
+      )
+    );
+    for (const job of resume) {
+      await env.CACHE.delete(pauseKey(job.id));
+      resumedShops.add(job.shopId);
+    }
+  }
+
+  for (const shopId of resumedShops) {
+    await env.NOTIFY.send({ to: toShop(shopId), template: "shop.listing_resumed" });
+  }
+
+  return { resumedShops: resumedShops.size };
 }
