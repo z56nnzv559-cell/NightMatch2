@@ -152,6 +152,12 @@ it("メール設定が未完了でも通知キューを壊さずDBに残す", as
 });
 
 it("queue直後とcronが同時にflushしても同じfallbackは1通だけ送る", async () => {
+  /* 前ケースが意図的に残した未送信fallbackは、この競合テストの対象外。 */
+  await env.DB.prepare(
+    `DELETE FROM notification_fallbacks
+      WHERE recipient='admin' OR recipient LIKE 'shop:%'`
+  ).run();
+
   const shopId = await seedShop();
   await addOwner(shopId, "once@example.jp");
   await addFallback(`shop:${shopId}`);
