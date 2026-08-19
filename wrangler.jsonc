@@ -75,10 +75,6 @@
     "crons": ["0 19 * * *"]
   },
 
-  "analytics_engine_datasets": [
-    { "binding": "EVENTS", "dataset": "akari_events" }
-  ],
-
   "observability": { "enabled": true },
 
   "vars": {
