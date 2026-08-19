@@ -30,6 +30,12 @@ export type Env = {
 
   ACCESS_TEAM_DOMAIN: string;   // <team>.cloudflareaccess.com
   ACCESS_AUD: string;           // Access アプリの Audience タグ
+
+  /* Cloudflare Email Service (REST API)。未設定ならfallback行を残して再試行する。 */
+  EMAIL_ACCOUNT_ID?: string;
+  EMAIL_API_TOKEN?: string;
+  EMAIL_FROM?: string;
+  EMAIL_ADMIN_TO?: string;
 };
 
 /* 通知の宛先。この3種しかない。
