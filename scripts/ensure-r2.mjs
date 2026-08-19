@@ -24,8 +24,8 @@ for (const name of buckets) {
   run(["r2", "bucket", "create", name]);
 }
 
-// KV: avoid relying on beta automatic provisioning in Workers Builds.
-const kvTitle = "nightmatch2-cache";
+// KV: reuse an existing NightMatch cache namespace if one was already
+// created by Wrangler's automatic provisioning or by a previous build.
 const readKvNamespaces = () => {
   const raw = run(["kv", "namespace", "list"], true);
   try {
@@ -36,22 +36,40 @@ const readKvNamespaces = () => {
   }
 };
 
+const findCacheNamespace = (namespaces) => {
+  const preferred = [
+    "nightmatch2-cache",
+    "nightmatch2-nightmatch2-cache",
+    "nightmatch2-CACHE",
+  ];
+
+  for (const title of preferred) {
+    const match = namespaces.find((ns) => ns.title === title);
+    if (match) return match;
+  }
+
+  return namespaces.find((ns) => {
+    const title = String(ns.title || "").toLowerCase();
+    return title.startsWith("nightmatch2") && title.endsWith("cache");
+  });
+};
+
 let namespaces = readKvNamespaces();
-let cache = namespaces.find((ns) => ns.title === kvTitle);
+let cache = findCacheNamespace(namespaces);
 
 if (!cache) {
-  console.log(`Creating KV namespace: ${kvTitle}`);
-  run(["kv", "namespace", "create", kvTitle]);
+  console.log("No NightMatch2 cache namespace found; creating CACHE namespace");
+  run(["kv", "namespace", "create", "CACHE"]);
   namespaces = readKvNamespaces();
-  cache = namespaces.find((ns) => ns.title === kvTitle);
+  cache = findCacheNamespace(namespaces);
 }
 
 if (!cache?.id) {
-  throw new Error(`KV namespace ${kvTitle} was not created or has no id`);
+  throw new Error("NightMatch2 cache KV namespace was not found or has no id");
 }
 
 const configPath = "wrangler.jsonc";
 const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
 config.kv_namespaces = [{ binding: "CACHE", id: cache.id }];
 fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
-console.log(`Bound CACHE to KV namespace ${kvTitle} (${cache.id})`);
+console.log(`Bound CACHE to existing KV namespace ${cache.title} (${cache.id})`);
