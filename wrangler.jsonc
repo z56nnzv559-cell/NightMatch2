@@ -81,6 +81,7 @@
     "APP_ENV": "production",
     "VAPID_SUBJECT": "mailto:ops@example.jp",
     "ACCESS_TEAM_DOMAIN": "<team>.cloudflareaccess.com",
-    "ACCESS_AUD": "<audience-tag>"
+    "ACCESS_AUD": "<audience-tag>",
+    "TURNSTILE_SITE_KEY": "0x4AAAAAAEVLG-tRt9YJa7rW"
   }
 }
