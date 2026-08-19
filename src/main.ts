@@ -45,6 +45,93 @@ function envForCore(env: Env): Env {
   });
 }
 
+function positiveInteger(value: unknown) {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+async function handleCreateJob(request: Request, env: Env) {
+  const session = await sessionOf(request, env);
+  if (!session || session.kind !== "shop") {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
+  if (!(await verifiedShop(env, session.shopId))) {
+    return Response.json({ error: "shop_not_verified" }, { status: 403 });
+  }
+
+  let input: {
+    area?: string;
+    businessType?: string;
+    trialPay?: number;
+    hourlyMin?: number;
+    hourlyMax?: number;
+    hours?: string;
+    body?: string;
+    perks?: string[];
+  };
+  try {
+    input = await request.json();
+  } catch {
+    return Response.json({ error: "invalid_json" }, { status: 400 });
+  }
+
+  const area = String(input.area ?? "").trim();
+  const businessType = String(input.businessType ?? "").trim();
+  const trialPay = positiveInteger(input.trialPay);
+  const hourlyMin = positiveInteger(input.hourlyMin);
+  const hourlyMax = positiveInteger(input.hourlyMax);
+  const hours = String(input.hours ?? "").trim();
+  const description = String(input.body ?? "").trim();
+  const perks = [...new Set((input.perks ?? []).map((p) => String(p).trim()).filter(Boolean))];
+
+  if (!area || !businessType || trialPay === null || hourlyMin === null || hourlyMax === null) {
+    return Response.json({ error: "invalid_fields" }, { status: 400 });
+  }
+  if (hourlyMin > hourlyMax) {
+    return Response.json({ error: "invalid_hourly_range" }, { status: 400 });
+  }
+  if (area.length > 100 || hours.length > 120 || description.length > 5000 || perks.length > 20) {
+    return Response.json({ error: "field_too_long" }, { status: 400 });
+  }
+
+  const shop = await env.DB.prepare(
+    `SELECT business_type FROM shops WHERE id=? AND status='active' AND verified_at IS NOT NULL`
+  )
+    .bind(session.shopId)
+    .first<{ business_type: string }>();
+  if (!shop) return Response.json({ error: "shop_not_verified" }, { status: 403 });
+  if (shop.business_type !== businessType) {
+    return Response.json({ error: "business_type_mismatch" }, { status: 400 });
+  }
+
+  const jobId = uid("jb");
+  const statements = [
+    env.DB.prepare(
+      `INSERT INTO jobs
+         (id, shop_id, area, business_type, trial_pay, hourly_min, hourly_max,
+          hours, perks, body, is_open)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+    ).bind(
+      jobId,
+      session.shopId,
+      area,
+      businessType,
+      trialPay,
+      hourlyMin,
+      hourlyMax,
+      hours || null,
+      JSON.stringify(perks),
+      description || null
+    ),
+    ...perks.map((perk) =>
+      env.DB.prepare(`INSERT INTO job_perks (job_id, perk) VALUES (?, ?)`).bind(jobId, perk)
+    ),
+  ];
+
+  await env.DB.batch(statements);
+  return Response.json({ jobId, isOpen: true }, { status: 201 });
+}
+
 async function handleScout(request: Request, env: Env) {
   const session = await sessionOf(request, env);
   if (!session || session.kind !== "shop") {
@@ -152,6 +239,9 @@ async function handleScout(request: Request, env: Env) {
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/api/jobs") {
+      return handleCreateJob(request, env);
+    }
     if (request.method === "POST" && url.pathname === "/api/deals/scout") {
       return handleScout(request, env);
     }
