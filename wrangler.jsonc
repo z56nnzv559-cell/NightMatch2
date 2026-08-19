@@ -12,32 +12,25 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "akari",
-      "database_id": "<id>"
-      // D1 は単一ロケーション。置き場所は作成時にしか決められないので、
-      // ここではなく `wrangler d1 create akari --location apac` で指定する
-      // （利用者が国内に集中するので東京寄りに置く）
+      "database_name": "akari"
     }
   ],
 
   "r2_buckets": [
     {
-      // 写真の原本。公開バインドは付けない。配信は Images の派生だけ
       "binding": "ORIGINALS",
       "bucket_name": "akari-originals"
     },
     {
-      // 身分証。判定後に消す前提でライフサイクルを短く設定する
       "binding": "KYC_DOCS",
       "bucket_name": "akari-kyc"
     }
   ],
 
   "kv_namespaces": [
-    { "binding": "CACHE", "id": "<id>" }
+    { "binding": "CACHE" }
   ],
 
-  // 写真の派生を作る。原本は R2 に置いたまま、ここを通した結果だけ配信する
   "images": { "binding": "IMAGES" },
 
   "durable_objects": {
@@ -73,19 +66,13 @@
         "queue": "akari-payout",
         "max_batch_size": 1,
         "max_retries": 3,
-        // 振込は再送で二重払いになるため、必ず失敗を人が見る
         "dead_letter_queue": "akari-payout-dlq"
       }
     ]
   },
 
   "triggers": {
-    "crons": [
-      // 04:00 JST。出勤日数の集計と定着判定。
-      // 日本時間の月初に当たった回で、前月ぶんの請求も下書きする
-      // （cron の指定は UTC なので「月末の19時」を別に書けない）
-      "0 19 * * *"
-    ]
+    "crons": ["0 19 * * *"]
   },
 
   "analytics_engine_datasets": [
@@ -100,5 +87,4 @@
     "ACCESS_TEAM_DOMAIN": "<team>.cloudflareaccess.com",
     "ACCESS_AUD": "<audience-tag>"
   }
-  // 秘密は wrangler secret put。Stripe / 振込 / KYC の鍵はここに書かない
 }
