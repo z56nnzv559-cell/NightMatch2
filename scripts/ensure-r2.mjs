@@ -73,3 +73,10 @@ const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
 config.kv_namespaces = [{ binding: "CACHE", id: cache.id }];
 fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
 console.log(`Bound CACHE to existing KV namespace ${cache.title} (${cache.id})`);
+
+// D1: the Git-connected deploy previously created/bound the database but did
+// not apply the schema migrations. Apply all pending migrations before
+// wrangler deploy so the production Worker never runs against an empty DB.
+console.log("Applying pending D1 migrations to akari...");
+run(["d1", "migrations", "apply", "akari", "--remote"]);
+console.log("D1 migrations are up to date");
