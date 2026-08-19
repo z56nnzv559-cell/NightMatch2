@@ -11,7 +11,7 @@ type KycWebhookBody = {
  * KYC の「審査に通らなかった」と「年齢要件を満たさない」を分ける。
  *
  * - provider が failed: 書類不鮮明などを含むので永久追放しない。
- *   suspended にして、同じアカウントのまま再提出できる。
+ *   paused にして、同じアカウントのまま再提出できる。
  * - provider が passed: ここで初めて provider が返した生年月日を信頼し、
  *   サーバ側の年齢・高校在学相当チェックを行う。
  * - passed なのに年齢要件外: 確定情報なので banned。
@@ -68,7 +68,7 @@ export async function handleKycWebhook(env: Env, request: Request) {
          VALUES (?, ?, 'external', 'failed', ?, datetime('now','+7 days'))`
       ).bind(uid("kyc"), workerId, documentKey || null),
       env.DB.prepare(
-        `UPDATE workers SET status='suspended', age_verified_at=NULL WHERE id=?`
+        `UPDATE workers SET status='paused', age_verified_at=NULL WHERE id=?`
       ).bind(workerId),
     ]);
 
