@@ -7,6 +7,69 @@ type KycWebhookBody = {
   documentKey?: unknown;
 };
 
+function sqlTimestamp(ms: number) {
+  return new Date(ms).toISOString().replace("T", " ").replace("Z", "");
+}
+
+function timestampMs(value: string | null | undefined) {
+  if (!value) return Number.NaN;
+  return Date.parse(`${value.replace(" ", "T")}Z`);
+}
+
+function isKycTimestampCollision(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("UNIQUE constraint failed") &&
+    message.includes("kyc_checks.worker_id") &&
+    message.includes("kyc_checks.checked_at")
+  );
+}
+
+/*
+ * 本番D1に 0006 がまだ適用されておらず、旧 schema の
+ * UNIQUE(worker_id, checked_at) が残っていても再提出を保存できるようにする。
+ * checked_at をミリ秒精度で明示し、同時更新が衝突した場合は最新時刻を
+ * 読み直して1ms先で再試行する。0006適用後も同じ形式で問題なく動く。
+ */
+async function insertKycCheck(
+  env: Env,
+  workerId: string,
+  result: "passed" | "failed",
+  documentKey: string | null,
+  workerUpdate: D1PreparedStatement
+) {
+  const id = uid("kyc");
+  let floor = Date.now();
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const latest = await env.DB.prepare(
+      `SELECT checked_at FROM kyc_checks WHERE worker_id=? ORDER BY checked_at DESC LIMIT 1`
+    )
+      .bind(workerId)
+      .first<{ checked_at: string }>();
+    const latestMs = timestampMs(latest?.checked_at);
+    if (Number.isFinite(latestMs)) floor = Math.max(floor, latestMs + 1);
+    const checkedAt = sqlTimestamp(floor + attempt);
+
+    try {
+      await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO kyc_checks
+             (id, worker_id, provider, result, document_key, purge_after, checked_at)
+           VALUES (?, ?, 'external', ?, ?, datetime('now','+7 days'), ?)`
+        ).bind(id, workerId, result, documentKey, checkedAt),
+        workerUpdate,
+      ]);
+      return;
+    } catch (error) {
+      if (!isKycTimestampCollision(error)) throw error;
+      floor = Date.now() + attempt + 1;
+    }
+  }
+
+  throw new Error(`could not allocate unique kyc checked_at for ${workerId}`);
+}
+
 /*
  * KYC の「審査に通らなかった」と「年齢要件を満たさない」を分ける。
  *
@@ -61,16 +124,15 @@ export async function handleKycWebhook(env: Env, request: Request) {
   }
 
   if (result === "failed") {
-    await env.DB.batch([
-      env.DB.prepare(
-        `INSERT INTO kyc_checks
-           (id, worker_id, provider, result, document_key, purge_after)
-         VALUES (?, ?, 'external', 'failed', ?, datetime('now','+7 days'))`
-      ).bind(uid("kyc"), workerId, documentKey || null),
-      env.DB.prepare(
-        `UPDATE workers SET status='paused', age_verified_at=NULL WHERE id=?`
-      ).bind(workerId),
-    ]);
+    await insertKycCheck(
+      env,
+      workerId,
+      "failed",
+      documentKey || null,
+      env.DB.prepare(`UPDATE workers SET status='paused', age_verified_at=NULL WHERE id=?`).bind(
+        workerId
+      )
+    );
 
     return Response.json({
       ok: true,
@@ -82,16 +144,15 @@ export async function handleKycWebhook(env: Env, request: Request) {
   /* provider が本人確認を通した後だけ、生年月日を確定情報として使う。 */
   const age = isEligibleAge(birthDate);
   if (!age.ok) {
-    await env.DB.batch([
-      env.DB.prepare(
-        `INSERT INTO kyc_checks
-           (id, worker_id, provider, result, document_key, purge_after)
-         VALUES (?, ?, 'external', 'failed', ?, datetime('now','+7 days'))`
-      ).bind(uid("kyc"), workerId, documentKey || null),
-      env.DB.prepare(
-        `UPDATE workers SET status='banned', age_verified_at=NULL WHERE id=?`
-      ).bind(workerId),
-    ]);
+    await insertKycCheck(
+      env,
+      workerId,
+      "failed",
+      documentKey || null,
+      env.DB.prepare(`UPDATE workers SET status='banned', age_verified_at=NULL WHERE id=?`).bind(
+        workerId
+      )
+    );
 
     return Response.json({
       ok: true,
@@ -101,18 +162,17 @@ export async function handleKycWebhook(env: Env, request: Request) {
     });
   }
 
-  await env.DB.batch([
-    env.DB.prepare(
-      `INSERT INTO kyc_checks
-         (id, worker_id, provider, result, document_key, purge_after)
-       VALUES (?, ?, 'external', 'passed', ?, datetime('now','+7 days'))`
-    ).bind(uid("kyc"), workerId, documentKey || null),
+  await insertKycCheck(
+    env,
+    workerId,
+    "passed",
+    documentKey || null,
     env.DB.prepare(
       `UPDATE workers
           SET age_verified_at=datetime('now'), birth_date=?, status='active'
         WHERE id=?`
-    ).bind(birthDate, workerId),
-  ]);
+    ).bind(birthDate, workerId)
+  );
 
   return Response.json({ ok: true, status: "verified", retryable: false });
 }
