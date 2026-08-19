@@ -1,6 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./AppV2.jsx";
+import { startFallbackInbox } from "./fallback-notices";
 import "./styles.css";
 
 /* 受信側が無いとWeb Pushが成功しても画面には何も出ない。
@@ -12,6 +13,9 @@ if ("serviceWorker" in navigator) {
     });
   });
 }
+
+/* Pushが届かなかった重要通知は、本人の連絡先を持たずに次回ログインで補う。 */
+startFallbackInbox();
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
