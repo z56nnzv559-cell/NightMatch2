@@ -42,7 +42,7 @@ it("KYC事業者の failed は永久追放せず、同じアカウントで再�
   });
 
   expect(await workerState(workerId)).toEqual({
-    status: "suspended",
+    status: "paused",
     birth_date: "2000-05-05",
     age_verified_at: null,
   });
