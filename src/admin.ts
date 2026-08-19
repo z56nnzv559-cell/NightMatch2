@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Env, PayoutMessage } from "./env";
 import { uid } from "./env";
 import { finalizeInvoice } from "./billing";
+import { ADMIN_HTML } from "./admin-ui";
 
 /* =====================================================================
    運営の管理画面 API
@@ -66,6 +67,19 @@ admin.use("*", async (c, next) => {
   c.set("admin", email);
   await next();
 });
+
+admin.get("/", () =>
+  new Response(ADMIN_HTML, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy":
+        "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+    },
+  })
+);
 
 async function audit(env: Env, actor: string, action: string, target: string, detail?: unknown) {
   await env.DB.prepare(
@@ -153,7 +167,10 @@ admin.post("/review/:id/resolve", async (c) => {
     const deal = await c.env.DB.prepare(`SELECT shop_id FROM deals WHERE id=?`)
       .bind(rc.deal_id).first<{ shop_id: string }>();
     if (deal) {
-      await c.env.DB.prepare(`UPDATE jobs SET is_open=0 WHERE shop_id=?`).bind(deal.shop_id).run();
+      /* 違反確定による停止は返信率の回復で自動復帰させない。 */
+      await c.env.DB.prepare(
+        `UPDATE jobs SET is_open=0, pause_reason='manual' WHERE shop_id=?`
+      ).bind(deal.shop_id).run();
       await c.env.NOTIFY.send({ to: `shop:${deal.shop_id}`, template: "shop.suspended_bypass" });
     }
   }
@@ -166,21 +183,51 @@ admin.get("/invoices", async (c) => {
   const rows = await c.env.DB.prepare(
     `SELECT i.id, i.period, i.subtotal, i.status, i.sent_at, s.name
        FROM invoices i JOIN shops s ON s.id = i.shop_id
-      ORDER BY i.created_at DESC LIMIT 100`
+      ORDER BY (i.status='draft') DESC, i.created_at DESC LIMIT 100`
   ).all();
   return c.json({ invoices: rows.results });
 });
 
 admin.get("/invoices/:id", async (c) => {
+  const invoice = await c.env.DB.prepare(
+    `SELECT i.id, i.period, i.subtotal, i.status, i.external_ref, i.sent_at,
+            s.name AS shop_name
+       FROM invoices i JOIN shops s ON s.id=i.shop_id
+      WHERE i.id=?`
+  ).bind(c.req.param("id")).first<{
+    id: string;
+    period: string;
+    subtotal: number;
+    status: string;
+    external_ref: string | null;
+    sent_at: string | null;
+    shop_name: string;
+  }>();
+  if (!invoice) return c.json({ error: "not_found" }, 404);
+
   const lines = await c.env.DB.prepare(
     `SELECT l.deal_id, l.kind, l.state, l.amount, w.nickname, l.occurred_at
        FROM ledger_entries l
        JOIN deals d ON d.id = l.deal_id
        JOIN workers w ON w.id = d.worker_id
-      WHERE l.settled_ref = ?
+      WHERE l.settled_ref = ? AND l.party='shop_fee'
       ORDER BY l.occurred_at`
-  ).bind(c.req.param("id")).all();
-  return c.json({ lines: lines.results });
+  ).bind(c.req.param("id")).all<{
+    deal_id: string;
+    kind: string;
+    state: string;
+    amount: number;
+    nickname: string;
+    occurred_at: string;
+  }>();
+
+  const ledgerTotal = lines.results.reduce((sum, line) => sum + line.amount, 0);
+  return c.json({
+    invoice,
+    lines: lines.results,
+    ledgerTotal,
+    mismatch: ledgerTotal !== invoice.subtotal,
+  });
 });
 
 admin.post("/invoices/:id/send", async (c) => {
@@ -206,20 +253,25 @@ admin.get("/shops/pending", async (c) => {
 admin.post("/shops/:id/verify", async (c) => {
   const actor = c.get("admin");
   const { licenseNo } = await c.req.json<{ licenseNo: string }>();
-  await c.env.DB.prepare(
+  const clean = licenseNo?.trim();
+  if (!clean) return c.json({ error: "license_required" }, 400);
+
+  const updated = await c.env.DB.prepare(
     `UPDATE shops
-        SET license_no=?, verified_at=datetime('now'),
-            status = CASE WHEN status='suspended' THEN 'active' ELSE status END
-      WHERE id=?`
-  ).bind(licenseNo, c.req.param("id")).run();
-  await audit(c.env, actor, "shop.verified", c.req.param("id"), { licenseNo });
+        SET license_no=?, verified_at=datetime('now'), status='active'
+      WHERE id=? AND status='suspended' AND verified_at IS NULL`
+  ).bind(clean, c.req.param("id")).run();
+  if (updated.meta.changes === 0) return c.json({ error: "not_pending" }, 409);
+
+  await audit(c.env, actor, "shop.verified", c.req.param("id"), { licenseNo: clean });
   return c.json({ ok: true });
 });
 
 admin.post("/shops/:id/resume", async (c) => {
   const actor = c.get("admin");
-  await c.env.DB.prepare(`UPDATE jobs SET is_open=1 WHERE shop_id=? AND is_open=0`)
-    .bind(c.req.param("id")).run();
+  await c.env.DB.prepare(
+    `UPDATE jobs SET is_open=1, pause_reason=NULL WHERE shop_id=? AND is_open=0`
+  ).bind(c.req.param("id")).run();
   await audit(c.env, actor, "shop.resumed", c.req.param("id"));
   return c.json({ ok: true });
 });
