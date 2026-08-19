@@ -166,14 +166,18 @@ export class TrialCode extends DurableObject<Env> {
 const CONTACT = /(line\s*id|ライン|@[\w.-]{3,}|0[789]0[-\s]?\d{4}[-\s]?\d{4})/i;
 
 type Msg = { dealId: string; from: string; body: string; at: number };
+type SocketIdentity = { dealId: string; from: string };
 
 export class Conversation extends DurableObject<Env> {
   async fetch(req: Request) {
     const url = new URL(req.url);
 
-    /* スカウトの1通目。まだ相手が接続していないので保存だけする */
+    /* スカウトの1通目。Worker内部からだけ来るが、DBでも当事者を確認する。 */
     if (url.pathname === "/seed") {
       const seed = await req.json<Omit<Msg, "at">>();
+      if (!(await this.validIdentity(seed.dealId, seed.from))) {
+        return Response.json({ error: "invalid_sender" }, { status: 403 });
+      }
       await this.persist({ ...seed, at: Date.now() });
       await this.notifyCounterpart(seed.dealId, seed.from);
       return Response.json({ ok: true });
@@ -195,14 +199,47 @@ export class Conversation extends DurableObject<Env> {
       return new Response("expected websocket", { status: 426 });
     }
 
+    const dealId = req.headers.get("x-nightmatch-deal-id") ?? "";
+    const from = req.headers.get("x-nightmatch-sender") ?? "";
+    if (!dealId || !from || !(await this.validIdentity(dealId, from))) {
+      return Response.json({ error: "invalid_socket_identity" }, { status: 403 });
+    }
+
     const pair = new WebSocketPair();
-    this.ctx.acceptWebSocket(pair[1]);
+    const server = pair[1];
+    this.ctx.acceptWebSocket(server);
+    server.serializeAttachment({ dealId, from } satisfies SocketIdentity);
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
   async webSocketMessage(ws: WebSocket, raw: string) {
-    const incoming = JSON.parse(raw) as Omit<Msg, "at">;
-    const msg: Msg = { ...incoming, at: Date.now() };
+    const identity = ws.deserializeAttachment() as SocketIdentity | null;
+    if (!identity?.dealId || !identity.from) {
+      ws.close(1008, "missing identity");
+      return;
+    }
+
+    let incoming: { body?: unknown };
+    try {
+      incoming = JSON.parse(raw) as { body?: unknown };
+    } catch {
+      ws.send(JSON.stringify({ error: "invalid_json" }));
+      return;
+    }
+
+    const body = String(incoming.body ?? "").trim();
+    if (!body || body.length > 2000) {
+      ws.send(JSON.stringify({ error: "invalid_message" }));
+      return;
+    }
+
+    /* クライアントの from / dealId は完全に無視する。接続時の身元だけを使う。 */
+    const msg: Msg = {
+      dealId: identity.dealId,
+      from: identity.from,
+      body,
+      at: Date.now(),
+    };
 
     await this.persist(msg);
 
@@ -218,6 +255,16 @@ export class Conversation extends DurableObject<Env> {
 
   async webSocketClose(ws: WebSocket, code: number) {
     ws.close(code, "closing");
+  }
+
+  private async validIdentity(dealId: string, from: string) {
+    const deal = await this.env.DB.prepare(
+      `SELECT worker_id, shop_id FROM deals WHERE id=?`
+    )
+      .bind(dealId)
+      .first<{ worker_id: string; shop_id: string }>();
+    if (!deal) return false;
+    return from === `worker:${deal.worker_id}` || from === `shop:${deal.shop_id}`;
   }
 
   private async notifyCounterpart(dealId: string, from: string) {
@@ -247,6 +294,6 @@ export class Conversation extends DurableObject<Env> {
          記録して運営が見る。体入前の連絡先交換は規約違反として扱う。 */
     }
 
-    await this.ctx.storage.put(`m:${msg.at}`, msg);
+    await this.ctx.storage.put(`m:${msg.at}:${crypto.randomUUID()}`, msg);
   }
 }
