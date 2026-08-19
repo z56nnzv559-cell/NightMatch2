@@ -31,8 +31,6 @@ self.addEventListener("push", (event) => {
   event.waitUntil(
     self.registration.showNotification("NightMatch", {
       body,
-      icon: "/icons/icon-192.png",
-      badge: "/icons/badge-96.png",
       tag: dealId ? `deal:${dealId}:${template}` : `notice:${template || "generic"}`,
       renotify: Boolean(dealId),
       data: { dealId },
