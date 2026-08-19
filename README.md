@@ -80,6 +80,21 @@ R2 の写真原本・KYC書類用バケットには公開ドメインを設定�
 
 `JWT_SECRET` と `IMG_SIGNING_KEY` は十分に長いランダム値を使用してください。
 
+### Push未達メール
+
+重要なPush通知が誰にも届かなかった場合、女性本人には次回ログイン時のNightMatch内通知で表示します。女性のメールアドレス・電話番号は保存しません。
+
+店舗ownerと運営には Cloudflare Email Service の REST API で安全な固定文面だけを送ります。金額・店舗名・相手の名前・メッセージ本文はメールへ載せません。WorkersのEmail bindingは使用しないため、既存Workerのバインディングを増やさず利用できます。
+
+Cloudflare Email Service で送信ドメインを有効化した後、次の4値を本番Workerへ設定します。
+
+- `EMAIL_ACCOUNT_ID`: Email Serviceを有効化したCloudflare Account ID
+- `EMAIL_API_TOKEN`: Email Sending権限を持つCloudflare API Token
+- `EMAIL_FROM`: 検証済み送信ドメインのFromアドレス（例 `notice@example.jp`）
+- `EMAIL_ADMIN_TO`: 運営が受信するメールアドレス
+
+これらが未設定、またはEmail Serviceが一時的に失敗した場合、通知は `notification_fallbacks` に未送信のまま残り、次の通知キュー実行または日次cronで再試行します。
+
 ## Cloudflare Access / 管理画面
 
 `/admin/` は Cloudflare Access のJWTをWorker側でも検証します。`wrangler.jsonc` の以下を実環境の値に変更します。
@@ -122,6 +137,7 @@ src/
   billing.ts         Stripe 請求・Webhook
   payout-runtime.ts  お祝い金の実送金処理
   push.ts            Web Push
+  email-fallback.ts  Push未達時の店舗/運営メールと再試行
   photos.ts          写真保存・公開範囲・署名配信
   kyc.ts             KYC Webhook / 再提出状態
   admin.ts           Cloudflare Access 内の管理API
