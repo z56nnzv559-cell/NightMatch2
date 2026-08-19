@@ -7,6 +7,7 @@ import {
   uid,
   verifySession,
 } from "./env";
+import { photoUrlFor, type FaceMode } from "./photos";
 
 function cookieValue(request: Request, name: string) {
   const cookies = request.headers.get("cookie") ?? "";
@@ -48,6 +49,140 @@ function envForCore(env: Env): Env {
 function positiveInteger(value: unknown) {
   const n = Number(value);
   return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+function jsonStrings(raw: string | null) {
+  if (!raw) return [] as string[];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [] as string[];
+  }
+}
+
+async function handleWorkers(request: Request, env: Env) {
+  const session = await sessionOf(request, env);
+  if (!session || session.kind !== "shop") {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
+  if (!(await verifiedShop(env, session.shopId))) {
+    return Response.json({ error: "shop_not_verified" }, { status: 403 });
+  }
+
+  const url = new URL(request.url);
+  const area = url.searchParams.get("area")?.trim() || null;
+  const businessType = url.searchParams.get("type")?.trim() || null;
+  const day = url.searchParams.get("day")?.trim() || null;
+  const hourlyMaxRaw = url.searchParams.get("hourlyMax");
+  const hourlyMax = hourlyMaxRaw === null ? null : positiveInteger(hourlyMaxRaw);
+  if (hourlyMaxRaw !== null && hourlyMax === null) {
+    return Response.json({ error: "invalid_hourly_max" }, { status: 400 });
+  }
+
+  const requestedLimit = positiveInteger(url.searchParams.get("limit") ?? 20) ?? 20;
+  const limit = Math.min(Math.max(requestedLimit, 1), 50);
+  /* JSONの希望条件をSQLで走査せず、部分索引で候補を絞ってからアプリ側で判定する。 */
+  const candidateLimit = Math.min(Math.max(limit * 5, 50), 200);
+  const where = ["status='active'", "age_verified_at IS NOT NULL"];
+  const bind: unknown[] = [];
+  if (hourlyMax !== null) {
+    where.push("(hope_hourly IS NULL OR hope_hourly <= ?)");
+    bind.push(hourlyMax);
+  }
+
+  const candidates = await env.DB.prepare(
+    `SELECT id, nickname, birth_date, hope_hourly, hope_areas, hope_types,
+            available_days, bio, last_seen_at
+       FROM workers
+      WHERE ${where.join(" AND ")}
+      ORDER BY hope_hourly DESC, last_seen_at DESC
+      LIMIT ?`
+  )
+    .bind(...bind, candidateLimit)
+    .all<{
+      id: string;
+      nickname: string;
+      birth_date: string;
+      hope_hourly: number | null;
+      hope_areas: string | null;
+      hope_types: string | null;
+      available_days: string | null;
+      bio: string | null;
+      last_seen_at: string | null;
+    }>();
+
+  const filtered = candidates.results
+    .map((w) => ({
+      ...w,
+      hopeAreas: jsonStrings(w.hope_areas),
+      hopeTypes: jsonStrings(w.hope_types),
+      availableDays: jsonStrings(w.available_days),
+    }))
+    .filter((w) => !area || w.hopeAreas.includes(area))
+    .filter((w) => !businessType || w.hopeTypes.includes(businessType))
+    .filter((w) => !day || w.availableDays.includes(day))
+    .slice(0, limit);
+
+  if (filtered.length === 0) return Response.json({ workers: [] });
+
+  const ids = filtered.map((w) => w.id);
+  const placeholders = ids.map(() => "?").join(",");
+  const photos = await env.DB.prepare(
+    `SELECT worker_id, id, face_mode, variant_id
+       FROM photos
+      WHERE is_primary=1 AND worker_id IN (${placeholders})`
+  )
+    .bind(...ids)
+    .all<{ worker_id: string; id: string; face_mode: FaceMode; variant_id: string | null }>();
+  const photoByWorker = new Map(photos.results.map((p) => [p.worker_id, p]));
+
+  const visibleDeals = await env.DB.prepare(
+    `SELECT DISTINCT worker_id FROM deals
+      WHERE shop_id=? AND worker_id IN (${placeholders})
+        AND stage IN ('trial_done','hired','retained')`
+  )
+    .bind(session.shopId, ...ids)
+    .all<{ worker_id: string }>();
+  const dealVisible = new Set(visibleDeals.results.map((d) => d.worker_id));
+
+  const workers = await Promise.all(
+    filtered.map(async (w) => {
+      const primary = photoByWorker.get(w.id);
+      let photoUrl: string | null = null;
+      if (primary && (primary.face_mode !== "none" || primary.variant_id !== null)) {
+        photoUrl = await photoUrlFor(
+          env,
+          { id: primary.id, face_mode: primary.face_mode },
+          { kind: "shop" },
+          dealVisible.has(w.id)
+        );
+      }
+
+      const born = new Date(`${w.birth_date}T00:00:00Z`);
+      const now = new Date();
+      let age = now.getUTCFullYear() - born.getUTCFullYear();
+      const birthdayPassed =
+        now.getUTCMonth() > born.getUTCMonth() ||
+        (now.getUTCMonth() === born.getUTCMonth() && now.getUTCDate() >= born.getUTCDate());
+      if (!birthdayPassed) age -= 1;
+
+      return {
+        id: w.id,
+        nickname: w.nickname,
+        age,
+        hopeHourly: w.hope_hourly,
+        hopeAreas: w.hopeAreas,
+        hopeTypes: w.hopeTypes,
+        availableDays: w.availableDays,
+        bio: w.bio,
+        photoUrl,
+        lastSeenAt: w.last_seen_at,
+      };
+    })
+  );
+
+  return Response.json({ workers });
 }
 
 async function handleCreateJob(request: Request, env: Env) {
@@ -239,6 +374,9 @@ async function handleScout(request: Request, env: Env) {
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/api/workers") {
+      return handleWorkers(request, env);
+    }
     if (request.method === "POST" && url.pathname === "/api/jobs") {
       return handleCreateJob(request, env);
     }
