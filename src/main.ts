@@ -4,7 +4,6 @@ import {
   type NotifyMessage,
   type PayoutMessage,
   type Session,
-  toWorker,
   uid,
   verifySession,
 } from "./env";
@@ -95,6 +94,7 @@ async function handleScout(request: Request, env: Env) {
     return Response.json({ error: "already_open" }, { status: 409 });
   }
 
+  let workflowId: string;
   try {
     const instance = await env.DEAL_WORKFLOW.create({
       params: {
@@ -106,10 +106,18 @@ async function handleScout(request: Request, env: Env) {
         origin: "scout",
       },
     });
+    workflowId = instance.id;
     await env.DB.prepare(`UPDATE deals SET workflow_id=? WHERE id=?`)
-      .bind(instance.id, dealId)
+      .bind(workflowId, dealId)
       .run();
+  } catch (error) {
+    /* Workflow が始まる前なら、案件を残す意味がない。台帳もまだ動いていない。 */
+    await env.DB.prepare(`DELETE FROM deals WHERE id=?`).bind(dealId).run();
+    console.error("scout workflow creation failed", error);
+    return Response.json({ error: "scout_start_failed" }, { status: 503 });
+  }
 
+  try {
     const convoId = env.CONVERSATION.idFromName(dealId);
     await env.CONVERSATION.get(convoId).fetch("https://do/seed", {
       method: "POST",
@@ -120,14 +128,10 @@ async function handleScout(request: Request, env: Env) {
       }),
     });
   } catch (error) {
-    /* Workflow を作れなかった案件を「開いた案件」として残さない。台帳はまだ動いていない。 */
-    await env.DB.prepare(`DELETE FROM deals WHERE id=?`).bind(dealId).run();
-    console.error("scout workflow creation failed", error);
-    return Response.json({ error: "scout_start_failed" }, { status: 503 });
+    /* Workflow 開始後は案件を消さない。会話だけの障害として記録する。 */
+    console.error("scout initial message failed", { dealId, workflowId, error });
   }
 
-  /* seed の通知に加え、通知キュー側の型を崩さないため宛先は必ず helper で作る。 */
-  void toWorker(workerId);
   return Response.json({ dealId }, { status: 201 });
 }
 
