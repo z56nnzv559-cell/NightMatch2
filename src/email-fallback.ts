@@ -16,7 +16,7 @@ type PendingFallback = {
 
 const SAFE_SUBJECT = "NightMatch：重要なお知らせ";
 const SAFE_TEXT =
-  "NightMatchに重要なお知らせがあります。金額・店舗名・メッセージ内容はメールには記載していません。NightMatchへログインしてご確認ください。";
+  "NightMatchに重要なお知らせがあります。金額・相手の名称・メッセージ内容などの詳細はメールには記載していません。NightMatchへログインしてご確認ください。";
 
 function configured(env: EmailEnv) {
   return Boolean(
