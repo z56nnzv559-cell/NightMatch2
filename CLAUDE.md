@@ -1,202 +1,168 @@
 # CLAUDE.md
 
-夜職の店舗と働く人をつなぐ、成果報酬型マッチング「灯 -AKARI-」。
-Cloudflare Workers 上で動く。日本語のサービスなので、UI 文言・コメント・
-コミットメッセージは日本語で書く。
+夜職の店舗と働く女性をつなぐ、成果報酬型マッチング **NightMatch**。
+Cloudflare Workers 上で動く日本語サービス。UI文言・コメント・コミットメッセージは日本語で書く。
+
+> 過去の本番リソースとの互換性のため、D1・R2・Queue・Cookie・一部のテスト用URLには `akari` という内部識別子が残る。これはプロダクト名ではない。利用者・店舗・請求書へ見せる名称は NightMatch に統一する。
 
 ## コマンド
 
 ```bash
-npm run dev:worker        # :8787  API（wrangler dev）
-npm run dev               # :5173  画面（/api を 8787 に転送）
+npm run dev:worker        # :8787 API（wrangler dev）
+npm run dev               # :5173 画面（/api を 8787 に転送）
 npm run db:migrate:local  # D1 をローカルに適用
-npm test                  # vitest（workerd の中で D1・DO・Workflows を本物で動かす）
+npm test                  # vitest
 npm run typecheck
-npm run verify            # 型 → テスト → ビルド → wrangler の設定検証
+npm run verify            # 型 → テスト → ビルド → wrangler dry-run
 npm run deploy            # vite build → wrangler deploy
 ```
 
-デプロイと本番 D1 への migrate は実行しない。手順を提示して人に任せる。
+本番D1の migrate / deploy は、対象環境を確認せずに実行しない。
 
 ## 進め方
 
-人と AI エージェントが交代で触る。「動くと言った」ではなく「機械が通した」
-を残す。
+人とAIエージェントが交代で触る。「動くと言った」ではなく「機械が通した」を残す。
 
-1. **issue を立ててから着手する。** 大きいものは sub-issue に割り、
-   1つの sub-issue = 1回の変更にする
-2. 実装する。数字が動く経路と権限の判定は、先にテストを書く
-3. `npm run verify` を通す。CI（`.github/workflows/verify.yml`）が
-   push と PR で同じものを走らせる
-4. PR で出す。テンプレートの申告欄を埋める。破ってはいけない約束に
-   触れた場合は、どれに・なぜを書く
+1. 原則として issue を確認してから着手する。大きいものは分割する。
+2. 金額・権限・年齢確認・個人安全に関わる変更はテストを同時に追加する。
+3. `npm run verify` を通す。GitHub Actions も同じ検証を実行する。
+4. PRにIssue番号、変更点、安全上の影響、確認内容を書く。
+5. CIが赤いPRはマージしない。失敗ログから実不具合が見つかった場合は、その場しのぎでテストを待たせず根本原因を直す。
 
-台帳・請求・権限・年齢確認は、壊れても画面上は静かに壊れる。
-実際にこのリポジトリでは、キュー消費と cron が動いていない不具合と、
-請求が永久に送れない不具合が、テストを書くまで誰にも見えていなかった。
+## 現在の構成
 
-## 構成
-
-```
-src/index.ts          API（Hono）。ルートと権限判定だけ。業務ロジックは置かない
-src/deal-workflow.ts  案件1件 = Workflow 1インスタンス。成果の唯一の真実
-src/trial-code-do.ts  体入コードの照合と会話（Durable Objects）
-src/billing.ts        Stripe。請求は台帳から組む
-src/push.ts           Web Push（VAPID + aes128gcm、自前実装）
-src/photos.ts         写真。原本は非公開、派生のみ配信
-src/admin.ts          管理画面 API（Cloudflare Access の内側）
-src/consumers.ts      キュー消費と cron
-src/auth.ts           鍵導出・合言葉・総当たり対策
-src/ledger.ts         台帳の読み方（何を請求できるか）の判定を1箇所に置く
-src/env.ts            型、JWT、署名、年齢判定、通知の宛先
-src/client/           画面（React + Vite、単一ファイルの App.jsx）
-migrations/           D1。連番で追加する。既存ファイルは編集しない
-test/                 vitest。金の経路と権限のテスト
+```text
+src/app-entry.ts       Worker の外側エントリ。画面向け補助APIや安全な上書きを接続
+src/main.ts            追加API / 安全な入口
+src/index.ts           Hono の主要API
+src/deal-workflow.ts   案件1件 = Workflow 1インスタンス。成果の唯一の真実
+src/trial-code-do.ts   体入コード照合と会話 Durable Objects
+src/billing.ts         Stripe。請求は台帳から組む
+src/payout-runtime.ts  お祝い金の実送金
+src/push.ts            Web Push（VAPID + aes128gcm）
+src/photos.ts          写真。原本は非公開、派生のみ署名配信
+src/kyc.ts             KYC webhook / 再提出処理
+src/admin.ts           Cloudflare Access 内の管理API
+src/admin-ui.ts        運営管理画面
+src/job-management.ts  求人編集・停止理由・返信率回復時の復帰
+src/consumers.ts       Queue 消費と cron
+src/auth.ts            鍵導出・合言葉・総当たり対策
+src/ledger.ts          台帳を請求可能か判定する規則
+src/env.ts             型、JWT、署名、年齢判定、通知宛先
+src/client/            React + Vite
+migrations/            D1。既存migrationは編集せず追加する
+test/                  vitest。workerd の D1/DO/Workflows を使う
 ```
 
 ## 破ってはいけない設計上の約束
 
-これらは好みではなく、破ると金銭事故か個人の安全に直結する。
-変更が必要だと判断したら、実装する前に理由を人に確認する。
+以下は好みではなく、破ると金銭事故か利用者の安全に直結する。
 
-**1. 金額を書くのは台帳だけ**
-`ledger_entries` は append-only。`UPDATE` で状態を書き換えない。
-取消は負の額の `reversed` 行を積む。`accrued`（仮計上）と `confirmed`
-（確定）は別の行。請求書と振込は必ずこの表からしか作らない。
-一意索引 `idx_ledger_once` が二重計上を弾くので、挿入は `INSERT OR IGNORE`。
+### 1. 金額の真実は `ledger_entries`
 
-取消には2つの意味がある。保証期間内の退店は**確定を経ずに仮計上を**
-取り消すので、これを値引きとして請求に載せてはいけない（請求していない
-金額を返すことになる）。請求済みの訂正だけが値引きになる。区別できるのは
-「同じ案件・相手・種類に確定行があるか」だけなので、判定は
-`src/ledger.ts` の1箇所に置く。請求書も店舗の画面もそこを通す。
+`ledger_entries` は append-only。既存行を `UPDATE` して状態変更しない。取消は負の `reversed` 行を追加する。`accrued` と `confirmed` は別行。
 
-**2. 仕訳は Workflow の step の中だけで書く**
-`step.do` の外で `ledger_entries` に触らない。step の外はリトライで
-何度も走るため。API から直接仕訳を立てるコードを追加しない。
+請求書とお祝い金の金額は必ず台帳から読む。APIリクエストやQueueメッセージの金額を真実として使わない。`idx_ledger_once` で二重計上を弾き、挿入は冪等にする。
 
-**3. 成果は双方の報告が揃って初めて成立する**
-体入は6桁コードを店舗と本人の両方が報告し、`TrialCode` DO が照合して
-`trial.verified` を出す。定着は `shift_reports` に同じ日付が両側から
-来た日だけを1出勤として数える。片側の申告で成果を立てない。
+保証期間内の退店は、請求していない `accrued` を取り消すだけなので店舗への値引きとして請求書へ載せない。請求済み訂正との区別は `src/ledger.ts` の規則を使う。
 
-「双方」は**その案件の当事者**でなければ意味がない。案件を触るルートは
-必ず `dealOf()` を通して当事者だけに限る。ここが緩いと、無関係の利用者の
-申告が相手側の1件と揃って出勤日数になり、請求が立つ。
+### 2. 仕訳は Workflow の冪等な step 内だけ
 
-**4. 写真の原本は絶対に外に出さない**
-R2 のバケットに公開ドメインを設定しない。配信は `/img/:id`（署名つき・
-寿命5分）のみ。`face_mode` が `eyes`（目線カット）のとき、原本からの
-自動生成をしない — 顔検出が外れると素顔が「目線カット」として出回る。
-本人が端末で帯を置いた画像を必須とし、無ければ 400 で拒否する。
-黙って `open` に落とすのは最悪の挙動。
+`step.do` の外で `ledger_entries` に書かない。APIから直接仕訳を作らない。
 
-**5. 通知に本文を載せない**
-金額・店名・案件の内容を push payload に入れない。渡すのは
-テンプレートIDと案件IDだけ（`pushBodyFor`）。通知はロック画面に出るため、
-そこが身バレの経路になる。
+### 3. 成果は案件の双方の報告が揃って初めて成立
 
-宛先は必ず `toWorker()` / `toShop()` / `ADMIN` で作る。生の ID を渡すと
-購読が引けず、通知が黙って消える。`Recipient` 型がこれを弾くので、
-`to:` に `string` を渡す形に緩めない。届かなかった重要通知は
-`notification_fallbacks` に残す。
+体入は6桁コードを店舗と本人の双方が報告し、`TrialCode` DO が照合して `trial.verified` を出す。出勤は同じ日付を双方が報告した日だけ数える。
 
-**6. 請求書は自動送付しない**
-cron は `draft` までしか進めない。`finalize` と `send` は管理画面から
-人が押す。送付前に台帳合計と `invoices.subtotal` を突き合わせ、
-ずれたら自動修正せず `ledger_mismatch` で止める。
+案件を進めるルートは必ず当事者確認を行う。無関係な利用者の申告を成果に結び付けない。
 
-**7. 料金と閾値はコードでなくデータ**
-金額・保証出勤日数は `fee_plans` テーブル。案件は成立時点の
-`fee_plan_id` を握るので、改定は既存案件に遡らない。
-定数をコードに書き戻さない。
+### 4. 写真原本は外へ出さない
 
-**8. 年齢確認を通らない利用者に何もさせない**
-応募・スカウト対象・写真公開のすべてで `workers.age_verified_at` を
-確認する。自己申告の生年月日を信じず、KYC が返した値で再判定する。
-18歳以上かどうかだけでなく高校卒業年度も見る（`isEligibleAge`）。
-この判定を緩める変更は行わない。
+R2の原本バケットに公開ドメインを付けない。配信は署名付き `/img/:id` のみ。
 
-**9. 本人に連絡先を持たせない**
-`workers` に email も電話番号も置かない。夜職の身バレはそこから起きる。
-入り直す手段は登録時に一度だけ渡す合言葉（`credentials`）で、運営も
-本人の連絡先を知らない。渡すのは登録の応答1回きりなので、
-「あとで再表示する」経路を作らない。
+`face_mode='eyes'` は本人が端末で目線帯を置いた派生画像を必須にする。顔検出による自動生成や、失敗時に `open` へ落とす処理は禁止。
 
-**10. 店舗のセッションは実在の証明ではない**
-店舗は自己申告で登録でき、`status='suspended'` で始まる。運営が所在地と
-風営法の許可を確認するまでは、女性の情報に触れる経路（写真の URL・
-スカウト）を開かない。判定は `verifiedShop()` を通す。新しく女性側の
-情報を出すルートを足すときは、必ずここも通す。
+`face_mode='none'` は体入成立まで店舗へURL自体を返さない。公開範囲を `none` に下げたら以前の派生を削除する。
 
-## D1 を触るときの注意
+### 5. Push通知に本文を載せない
 
-- 課金がスキャンした行数ベースなので、新しい検索経路には必ず索引を張る。
-- こだわり条件は `job_perks` を join する。JSON への `LIKE` は全表走査。
-- 1DBあたり10GB上限。設計思想が水平分割なので、大きくなったら分ける。
-- マイグレーションは追記のみ。`0004_...sql` のように連番で足す。
+Push payload はテンプレートIDと案件IDだけ。金額・店名・チャット本文をロック画面へ出さない。
+
+宛先は `toWorker()` / `toShop()` / `ADMIN` を使う。重要通知が届かなければ `notification_fallbacks` に残す。
+
+### 6. 請求書を自動送付しない
+
+cron は draft まで。管理画面で台帳合計と `invoices.subtotal` を並べ、完全一致した場合だけ人が送付する。ずれたら自動修正せず `ledger_mismatch` で止める。
+
+Stripeへ表示するサービス名は **NightMatch**。旧名称を請求説明へ戻さない。
+
+### 7. 料金と閾値はデータに置く
+
+金額・保証出勤日数は `fee_plans`。案件は成立時点の `fee_plan_id` を保持するため、料金改定を既存案件へ遡及させない。
+
+### 8. 年齢確認を通らない女性に求人活動をさせない
+
+応募・スカウト対象・写真公開で `age_verified_at` を確認する。自己申告の生年月日だけを信頼しない。
+
+KYC事業者の `failed` は写真不鮮明等を含むため `paused` として再提出可能にするが、機能は開かない。事業者が `passed` を返した後にのみ、その生年月日を `isEligibleAge()` で再判定する。年齢要件外が確定したら `banned`。
+
+### 9. 女性の連絡先を持たない
+
+`workers` に email / 電話番号を追加しない。ログインは登録時に一度だけ渡す合言葉。運営も復元できない設計を維持する。
+
+### 10. 店舗セッションは実在証明ではない
+
+店舗は自己申告で登録でき、運営確認までは `suspended`。所在地・許可確認が終わるまで女性一覧、写真、スカウト等を開かない。女性情報を返す新ルートでは必ず確認済み店舗か判定する。
+
+## チャットの追加ルール
+
+WebSocket接続時にWorker側で案件当事者を確定し、信頼済みの案件ID・話者をConversation DOへ渡す。DOはWebSocket attachmentに保存した身元を使い、クライアントJSONの `from` / `dealId` を信用しない。
+
+管理画面の中抜け審査にはチャット本文を表示しない。兆候と出来事の時系列だけを使う。
+
+## 求人停止のルール
+
+`is_open` だけで停止理由を判断しない。
+
+- 店舗の手動停止: `manual`
+- 返信率による停止: `response_rate`
+
+返信率回復時に自動復帰させるのは `response_rate` 由来だけ。運営処分・未払いなど別理由の停止を返信率回復で復帰させない。
+
+## D1を触るとき
+
+- 新しい検索経路には索引を張る。D1はスキャン行数がコストへ影響する。
+- こだわり条件は `job_perks` をjoinする。JSONへの `LIKE` で全表走査しない。
+- migrationは追記のみ。既存migrationを変更しない。
+- SQLiteの時刻精度とUNIQUE制約の組み合わせに注意する。KYC履歴は同一秒に複数結果が届くため、履歴IDを一意性の根拠にする。
+- 本番の外部キー動作は本番D1で確認するまで仮定しない。重要な書込経路はアプリ側でも所有権・参照先を検証する。
 
 ## 既知の落とし穴
 
-- `wrangler dev` では `waitForEvent` のタイムアウト後に後続の
-  `waitForEvent` がイベントを取り逃す不具合が報告されている（本番では
-  起きない）。ローカルで案件を通しで試すときはタイムアウトを跨がせない。
-- `step.do` のタイムアウトは30分以下。それより長い待ちは `waitForEvent`。
-- `step.do` の戻り値は 1MiB まで。
-- Images バインディングの `.input().transform()` は API が変わりやすい。
-  `photos.ts` を触る前に現行ドキュメントを確認する。
-- ハンドラは `export default {...}` に載せる。`export { queue }` の形は
-  Workers から拾われず、キュー消費と cron が黙って動かない。名前付きで
-  出せるのは DO と Workflow のクラスだけ（`satisfies ExportedHandler` で
-  形を縛っている）。
-- cron の指定は UTC。日本時間の月初に走らせたいものは「月末 19:00 UTC」に
-  なるので、cron 側では書けず、実行時に日本時間の日付を見て判断する。
-- SQLite の `date('now')` も UTC。台帳の締めのような境界は、日本時間の
-  月初を UTC の文字列に直してからバインドして比べる。
-- バインドの順番は SQL に現れる `?` の順番。`JOIN` は `WHERE` より前に
-  出るので、join の条件に使う値を先に積む。
+- `wrangler dev` のWorkflow timeout挙動は本番と一致しない場合がある。
+- `step.do` の長い待機は避け、長期待ちは `waitForEvent` を使う。
+- Images BindingはAPI変更があり得るため、`photos.ts` を触る際は現行Cloudflare仕様を確認する。
+- Workerのqueue / scheduledは `export default` ハンドラに載せる。名前付きexportだけでは拾われない。
+- cron / SQLite `now` はUTC。請求月境界はJSTからUTCへ明示的に変換する。
+- SQLの `?` のbind順はSQL上の出現順。JOIN条件のbindはWHEREより先になる場合がある。
+- KYC履歴やWebhookは再送・短時間連続到着を前提にする。
 
 ## テスト
 
-`npm test`。workerd の中で走らせ、D1・DO・Workflows は本物を使う。
-外に出る fetch（Stripe・振込・push）だけ差し替える。SQL の書き方そのものが
-仕様なので、SQLite は模造しない。
+`npm test` は workerd 内でD1・DO・Workflowsを使う。外部fetchだけを差し替える。SQLiteそのものをモックしない。
 
-- `deal-workflow.test.ts` 案件の4経路（無反応・体入のみ・取消・定着）で
-  台帳がどうなるか。`introspectWorkflowInstance` でイベントとタイムアウトを
-  作る
-- `invoice.test.ts` 請求の下書き。`invoices.subtotal` と印を付けた仕訳の
-  合計が必ず一致すること
-- `guarantee.test.ts` 両側から同じ日付が来た日だけを数えること
-- `authz.test.ts` 当事者以外が案件を進められないこと
-- `auth.test.ts` 入り直せること、確認前の店舗が女性の情報に触れないこと
-- `payout.test.ts` 台帳の確定額でしか振込まないこと
-- `notify.test.ts` 宛先の形と、届かなかった通知の控え
-- 新しく数字が動く経路を足したら、まず台帳のテストを足す
+重要なテスト領域:
 
-## 未実装（着手候補）
+- Workflow各経路と台帳
+- 請求下書き・送付前照合
+- 振込の台帳照合と保留解除
+- 当事者以外の案件操作拒否
+- スカウト求人の店舗所有権
+- WebSocket話者/案件の固定
+- 年齢/KYC再提出
+- 求人作成・編集・停止復帰
+- 女性一覧の年齢/店舗確認/写真公開範囲
+- 写真の署名配信と派生削除
+- Push payload とfallback
 
-店舗側は登録して確認を受けるところまでしか進めない。**求人を出す口と
-女性を探す口が無い**ので、確認が済んでも実際には何もできない。
-API の穴はこの2つが最大。
-
-1. 求人の作成・編集（`jobs` への書き込み経路が存在しない）
-2. 女性の一覧・検索（店舗がスカウト相手を見つける経路が無い）
-3. 管理画面の UI（API は実装済み。請求の確定と送付を押す場所が無い）
-4. 保留したお祝い金の解放（`payouts` を `queued` に戻すだけで振込が
-   再実行されない。`payouts` に `deal_id` と `kind` を持たせる 0005 が要る）
-5. Service Worker（`push.ts` の受け側）
-6. `notification_fallbacks` を実際にメール送信する処理
-7. 会話の話者検証（`Conversation` DO が `from` と `dealId` をクライアントの
-   JSON から受けている。なりすましと、無関係な案件への通知が通る）
-8. `photos.ts` のテスト（Images バインディングの差し替えが必要）
-
-## 未決の論点
-
-数字を動かす前に人に確認する。
-
-- 保証の出勤日数（既定14）。夜職の離職は最初の1〜2週に集中するため、
-  短いと店舗が損を感じ、長いと回収が遅れる
-- 体入報酬 ¥3,000 を取るか無料にするか。取ると冷やかし体入が減るが、
-  店舗の初回導入ハードルは上がる
-- 店舗の返信率の下限（既定50%）と、中抜け審査の閾値（既定4点）
+数字・権限・年齢・個人情報の経路を増やしたら、まずテストを追加する。
