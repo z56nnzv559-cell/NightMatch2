@@ -15,3 +15,10 @@ KYC_WEBHOOK_SECRET="KYC 事業者との共有シークレット"
 # Web Push。鍵の作り方は README を参照
 VAPID_PUBLIC_KEY="base64url の生の公開鍵"
 VAPID_PRIVATE_JWK='{"kty":"EC","crv":"P-256","d":"...","x":"...","y":"..."}'
+
+# Cloudflare Email Service (Push未達時の店舗・運営向けfallback)
+# 送信元ドメインは Cloudflare Email Service で事前にオンボードする。
+EMAIL_ACCOUNT_ID="Cloudflare account ID"
+EMAIL_API_TOKEN="Email Sending 権限を持つAPI token"
+EMAIL_FROM="notice@example.com"
+EMAIL_ADMIN_TO="ops@example.com"
