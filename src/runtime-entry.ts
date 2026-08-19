@@ -1,11 +1,15 @@
 import app, { type AppEnv } from "./app-entry";
 import type { NotifyMessage, PayoutMessage } from "./env";
 import { handleReviewResolveRuntime } from "./admin-review-runtime";
+import { handleKycRuntime } from "./kyc-runtime";
 import { consumePayoutBatch } from "./payout-runtime";
 
 export default {
   async fetch(request: Request, env: AppEnv, ctx: ExecutionContext) {
     const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/hooks/kyc") {
+      return handleKycRuntime(request, env);
+    }
     const review = url.pathname.match(/^\/admin\/review\/([^/]+)\/resolve$/);
     if (request.method === "POST" && review) {
       return handleReviewResolveRuntime(request, env, decodeURIComponent(review[1]));
