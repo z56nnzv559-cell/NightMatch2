@@ -1,220 +1,153 @@
-# 灯 -AKARI-
+# NightMatch
 
-夜職の店舗と働く人をつなぐ、成果報酬型のマッチング。Cloudflare Workers 上で動く。
+夜職の店舗と働く女性をつなぐ、成果報酬型の求人・スカウトマッチングアプリです。Cloudflare Workers / D1 / Durable Objects / Workflows / Queues / R2 を中心に構成しています。
 
-課金は2点のみ。**体入が実施されたとき**と、**本入店から所定の出勤日数に達したとき**。
-掲載とスカウト送信は無料。所定日数に届かず退店した場合、本入店分は請求しない。
-店舗から受け取る成果報酬の一部を、お祝い金として本人に還元する。
+店舗は求人を掲載し、年齢確認済みの女性へ直接スカウトできます。女性は求人へ応募し、店舗とアプリ内でやり取りします。成果報酬は、体入の実施と、本入店後に料金プランで定めた出勤日数へ達した時点で台帳へ記録されます。
 
----
+> **互換性について**
+> 過去のプロダクト名で作成した D1・R2・Queue・Cookie などには `akari` という内部識別子が残っています。これらは本番データ、ログインセッション、Cloudflareリソースとの互換性を壊さないために維持しています。ユーザー・店舗・請求書に表示するプロダクト名は **NightMatch** に統一します。
 
-## デプロイ
+## 主な機能
 
-以下は自分のアカウントで実行する。所要はおおよそ20分（外部サービスの登録を除く）。
+- 女性: 登録、合言葉ログイン、年齢確認、求人検索・応募、チャット、体入コード報告、出勤報告、お祝い金確認
+- 店舗: 登録・確認待ち、求人作成/編集/停止、女性検索、スカウト、応募管理、体入日確定、体入コード/出勤報告、請求見込み確認
+- 運営: Cloudflare Access 内の管理画面、店舗確認、請求確認・送付、中抜け審査
+- 安全性: 年齢確認済みユーザーのみ求人活動、写真原本非公開、公開範囲制御、当事者だけの案件操作、WebSocket話者固定
+- 金銭処理: append-only 台帳、Workflow 内での成果確定、請求前の台帳照合、振込の冪等性
 
-### 0. 前提
+## 開発
 
 ```bash
-node -v          # 20 以上
 npm install
-npx wrangler login
+npm run db:migrate:local
+npm run dev:worker   # API / Worker :8787
+npm run dev          # React / Vite :5173
 ```
 
-**Workers 有料プラン**が必要（Queues と Workflows が無料プランでは使えない）。
-
-さらに、以下3つはアカウント側でスイッチを入れる必要がある。CLI からは
-できないので、先にダッシュボードで有効化しておく。入れ忘れると
-`wrangler deploy` がバインディングの解決で止まる（コード側の問題ではない）。
-
-| 何を | どこで |
-|---|---|
-| R2 | ダッシュボード → R2 → 「R2 を有効にする」 |
-| Analytics Engine | ダッシュボード → Workers → Analytics Engine |
-| Images | ダッシュボード → Images |
-
-### 1. D1
+検証は次の1コマンドです。
 
 ```bash
-# D1 は単一ロケーション。置き場所は作成時にしか決められない
-npx wrangler d1 create akari --location apac
-# 出力された database_id を wrangler.jsonc の <id> に貼る
-npm run db:migrate           # 0001 → 0004 を本番に適用
+npm run verify
 ```
 
-### 2. KV / R2 / Queues
+`npm run verify` は、型チェック → Vitest → フロントエンドビルド → Wrangler dry-run の順で実行します。GitHub Actions でも同じ検証をPRごとに実行します。
+
+## Cloudflare の準備
+
+Workers のほか、D1、R2、Queues、Workflows、KV、Images を使用します。Analytics Engine は初期デプロイでは任意です。
+
+### D1
+
+既存環境では互換性のためデータベース名 `akari` を使用します。
+
+```bash
+npx wrangler d1 create akari --location apac
+npm run db:migrate
+```
+
+新規作成時は `wrangler.jsonc` に発行された `database_id` を設定してください。
+
+### R2 / KV / Queues
+
+既存の設定名は次のとおりです。
 
 ```bash
 npx wrangler kv namespace create CACHE
-# 出力された id を wrangler.jsonc に貼る
-
 npx wrangler r2 bucket create akari-originals
 npx wrangler r2 bucket create akari-kyc
-
-# 身分証は判定後に消すが、取り漏らしの保険として保存期間を切る
-# （prefix は位置引数。省略すると全体が対象になる）
-npx wrangler r2 bucket lifecycle add akari-kyc purge-30d --expire-days 30
-
 npx wrangler queues create akari-notify
 npx wrangler queues create akari-payout
 npx wrangler queues create akari-payout-dlq
 ```
 
-R2 の2つのバケットには**公開ドメインを設定しない**。写真の原本と身分証が
-直接引ける状態になると、この設計の前提が崩れる。配信は必ず Worker の
-`/img/:id`（署名つき・寿命5分）を通す。
+R2 の写真原本・KYC書類用バケットには公開ドメインを設定しません。写真配信は必ず署名付き `/img/:id` を通します。
 
-### 3. シークレット
+### Secrets
 
-```bash
-cp .dev.vars.example .dev.vars     # ローカル用
+ローカルでは `.dev.vars.example` をコピーしてください。本番値は `wrangler secret put` で登録します。
 
-for k in JWT_SECRET IMG_SIGNING_KEY TURNSTILE_SECRET \
-         STRIPE_SECRET STRIPE_WEBHOOK_SECRET \
-         PAYOUT_API_KEY KYC_WEBHOOK_SECRET \
-         VAPID_PUBLIC_KEY VAPID_PRIVATE_JWK; do
-  npx wrangler secret put $k
-done
-```
+主なSecret:
 
-`JWT_SECRET` と `IMG_SIGNING_KEY` は `openssl rand -base64 48`。
+- `JWT_SECRET`
+- `IMG_SIGNING_KEY`
+- `TURNSTILE_SECRET`
+- `STRIPE_SECRET`
+- `STRIPE_WEBHOOK_SECRET`
+- `PAYOUT_API_KEY`
+- `KYC_WEBHOOK_SECRET`
+- `VAPID_PUBLIC_KEY`
+- `VAPID_PRIVATE_JWK`
 
-VAPID の鍵は次で作る（公開鍵は base64url の生バイト、秘密鍵は JWK）。
+`JWT_SECRET` と `IMG_SIGNING_KEY` は十分に長いランダム値を使用してください。
 
-```bash
-node -e '
-const c=require("crypto");
-const {publicKey,privateKey}=c.generateKeyPairSync("ec",{namedCurve:"prime256v1"});
-const jwk=privateKey.export({format:"jwk"});
-const raw=publicKey.export({format:"jwk"});
-const b64u=s=>s;
-console.log("VAPID_PUBLIC_KEY=" + Buffer.concat([
-  Buffer.from([4]),
-  Buffer.from(raw.x,"base64url"),
-  Buffer.from(raw.y,"base64url")
-]).toString("base64url"));
-console.log("VAPID_PRIVATE_JWK=" + JSON.stringify(jwk));
-'
-```
+## Cloudflare Access / 管理画面
 
-### 4. Zero Trust（管理画面）
+`/admin/` は Cloudflare Access のJWTをWorker側でも検証します。`wrangler.jsonc` の以下を実環境の値に変更します。
 
-Cloudflare ダッシュボードで Access アプリケーションを作る。
+- `ACCESS_TEAM_DOMAIN`
+- `ACCESS_AUD`
 
-- パス: `akari.<自分のサブドメイン>.workers.dev/admin`
-- ポリシー: 運営メンバーのメールアドレスのみ
-- 作成後に表示される **Audience タグ** と **チームドメイン** を
-  `wrangler.jsonc` の `ACCESS_AUD` / `ACCESS_TEAM_DOMAIN` に入れる
+運営画面では次を操作できます。
 
-`/admin` は Access が付ける JWT を検証しているので、Access を通さない
-リクエストは 403 になる。ただし **Access アプリを作る前は誰でも 403 になるだけで、
-先に作らないと管理画面が使えない**ので、この手順を飛ばさない。
+- 確認待ち店舗の許可確認
+- 請求書の台帳明細と合計確認、送付
+- 中抜け疑い案件の時系列確認と判定
 
-### 5. デプロイ
+中抜け審査画面にはチャット本文を表示しません。
+
+## デプロイ
 
 ```bash
-npm run deploy       # vite build → wrangler deploy
+npm run verify
+npm run db:migrate
+npm run deploy
 ```
 
-URL は `https://akari.<自分のサブドメイン>.workers.dev`。
-`workers.dev` のサブドメインは Cloudflare ダッシュボードの Workers 画面で確認する。
+本番D1へのマイグレーションは、デプロイ対象環境を確認した上で実行してください。
 
-独自ドメインを当てる場合は `wrangler.jsonc` に `routes` を追加する。
-本番では独自ドメインを推奨する（`workers.dev` は WAF やレート制限の
-一部が使えないため）。
+デプロイ後は Stripe / KYC のWebhookをWorkerへ設定します。
 
-### 6. デプロイ後にやること
+- Stripe: `/hooks/stripe`
+- KYC: `/hooks/kyc`
 
-```bash
-# 動作確認
-curl https://akari.<subdomain>.workers.dev/api/jobs
-# → {"jobs":[]}  ... 求人が0件なのが正しい
+## ディレクトリ
 
-# Stripe の webhook 宛先を登録
-#   https://akari.<subdomain>.workers.dev/hooks/stripe
-#   購読するイベント: invoice.paid, invoice.payment_failed
-
-# KYC 事業者の webhook 宛先
-#   https://akari.<subdomain>.workers.dev/hooks/kyc
-```
-
-cron は `wrangler.jsonc` の設定で自動的に有効になる。毎日 04:00 JST に
-出勤日数を集計し、その回が日本時間の月初なら前月ぶんの請求を下書きする
-（cron の指定は UTC なので「月末の19時」を別の行では書けない）。
-
----
-
-## ローカル開発
-
-```bash
-npm run db:migrate:local
-npm run dev:worker      # :8787  API
-npm run dev             # :5173  画面（/api を 8787 に転送）
-npm test                # vitest。workerd の中で D1・DO・Workflows を動かす
-```
-
-`waitForEvent` のタイムアウト後に後続の `waitForEvent` がイベントを
-受け取れない不具合が `wrangler dev` で報告されている（本番では起きない）。
-案件の進行をローカルで通しで試すときは、タイムアウトを跨がせない。
-
----
-
-## 構成
-
-```
+```text
 src/
-  index.ts          API（Hono）。ルートと権限判定
-  deal-workflow.ts  案件1件 = Workflow 1インスタンス。成果の真実
-  trial-code-do.ts  体入コードの照合と会話（Durable Objects）
-  billing.ts        Stripe。請求は台帳から組む。送付は人が押す
-  push.ts           Web Push（VAPID + aes128gcm）
-  photos.ts         原本は非公開。派生のみ配信
-  admin.ts          管理画面 API（Cloudflare Access の内側）
-  consumers.ts      キュー消費と cron
-  auth.ts           鍵導出・合言葉・総当たり対策
-  ledger.ts         台帳の読み方（何を請求できるか）の判定
-  env.ts            型、JWT、署名、年齢判定、通知の宛先
-  client/           画面（React + Vite）
-migrations/         D1。0001 初期 / 0002 返信率と審査 / 0003 通知と監査 /
-                    0004 ログイン
-test/               vitest。金の経路と権限のテスト
+  app-entry.ts       Worker の外側エントリ。画面向け補助APIもここで接続
+  main.ts            追加の安全なAPI入口
+  index.ts           Hono の主要API
+  deal-workflow.ts   案件1件 = Workflow 1インスタンス
+  trial-code-do.ts   体入コード照合 / 会話 Durable Object
+  billing.ts         Stripe 請求・Webhook
+  payout-runtime.ts  お祝い金の実送金処理
+  push.ts            Web Push
+  photos.ts          写真保存・公開範囲・署名配信
+  kyc.ts             KYC Webhook / 再提出状態
+  admin.ts           Cloudflare Access 内の管理API
+  admin-ui.ts        運営管理画面
+  job-management.ts  求人編集・掲載停止理由・自動復帰
+  consumers.ts       Queue / cron
+  ledger.ts          台帳の請求判定
+  env.ts             型・署名・年齢判定など
+  client/            React / Vite UI
+migrations/           D1 migrations
+test/                 Vitest
 ```
 
-## 入り方
+## 守るべき設計
 
-店舗と本人で分ける。本人側に連絡先を持たせないのは、夜職の身バレが
-メールアドレスと電話番号から起きるため。
+1. **金額は台帳を真実にする。** 請求・振込の金額をリクエスト値から決めない。
+2. **仕訳はWorkflowの冪等なstep内だけで作る。**
+3. **体入・出勤は案件の双方が報告して初めて成果にする。**
+4. **写真原本を公開しない。** `face_mode` の設定と署名URLを必ず通す。
+5. **Push通知に本文・店名・金額を載せない。**
+6. **請求書は台帳と一致を確認してから人が送付する。**
+7. **料金・保証日数は `fee_plans` に持ち、既存案件へ遡及させない。**
+8. **年齢確認を通っていない女性に応募・スカウト対象化・写真公開を許可しない。**
+9. **女性の連絡先をDBに持たない。** ログインは登録時に一度だけ渡す合言葉を使う。
+10. **店舗は運営確認が完了するまで女性情報・スカウト機能へアクセスさせない。**
 
-| | 登録 | 入り直す |
-|---|---|---|
-| 店舗 | `POST /api/auth/shop/register`（自己申告。確認待ちで始まる） | `POST /api/auth/shop/login`（email＋パスワード） |
-| 本人 | `POST /api/auth/worker/register`（合言葉を一度だけ返す） | `POST /api/auth/worker/login`（合言葉） |
+## 現在の残課題
 
-**合言葉は登録の応答でしか渡さない。** 再表示の経路は作っていないので、
-控えを失うとその口座には入れなくなる（運営も復元できない）。
-
-店舗は登録した時点では `suspended`。運営が所在地と風営法の許可を確認して
-`POST /admin/shops/:id/verify` を通すまで、応募も受けられず、
-女性の写真もスカウトも触れない。
-
-## 動かす前に決めておくこと
-
-- **保証の出勤日数**（既定14）と**体入報酬**（既定 ¥3,000）。
-  `fee_plans` テーブルの値なので、マイグレーションなしで変えられる。
-  既存案件は成立時点の plan を握るため、変更は遡らない。
-- **返信率の下限**（既定50%）。これを下回った店舗は新規応募を止める。
-- **中抜け審査の閾値**（既定4点）。超えた案件はお祝い金の振込を保留する。
-
-## 未実装
-
-店舗側は登録して確認を受けるところまでしか進めない。求人を出す口と
-女性を探す口が無いので、確認が済んでも実際には何もできない。
-
-- 求人の作成・編集（`jobs` への書き込み経路が無い）
-- 女性の一覧・検索（スカウト相手を見つける経路が無い）
-- 管理画面の UI（API のみ実装済み。請求の確定と送付を押す場所が無い）
-- 保留したお祝い金の解放（振込が再実行されない）
-- Service Worker（`push.ts` の受け側）
-- `notification_fallbacks` を実際にメール送信する処理
-- 会話の話者検証（`Conversation` DO が発言者をクライアント任せにしている）
-- `photos.ts` のテスト（Images バインディングの差し替えが必要）
-- 画面（`client/App.jsx` は見た目の試作で、認証もAPI接続も入っていない）
+GitHub Issues を正とします。特に外部サービス設定を伴う項目は、コードだけで「完了」とせず、本番Cloudflare設定まで確認して閉じます。
