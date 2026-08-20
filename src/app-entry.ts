@@ -6,6 +6,7 @@ import {
   type Session,
   verifySession,
 } from "./env";
+import { handleDemoKycVerify } from "./demo-kyc";
 import { handleWorkerFallbackAck, handleWorkerFallbackList } from "./fallback-inbox";
 import {
   handlePatchJob,
@@ -16,7 +17,7 @@ import {
 import { handleKycWebhook } from "./kyc";
 import { handleSafeShiftReport } from "./reference-integrity";
 
-export type AppEnv = Env & { TURNSTILE_SITE_KEY?: string };
+export type AppEnv = Env & { TURNSTILE_SITE_KEY?: string; DEMO_KYC?: string };
 
 function cookieValue(request: Request, name: string) {
   const cookies = request.headers.get("cookie") ?? "";
@@ -146,7 +147,13 @@ export default {
       return handleKycWebhook(env, request);
     }
     if (request.method === "GET" && url.pathname === "/api/config") {
-      return Response.json({ turnstileSiteKey: env.TURNSTILE_SITE_KEY ?? "" });
+      return Response.json({
+        turnstileSiteKey: env.TURNSTILE_SITE_KEY ?? "",
+        demoKycAvailable: env.DEMO_KYC === "true" && url.hostname.endsWith(".workers.dev"),
+      });
+    }
+    if (request.method === "POST" && url.pathname === "/api/kyc/demo-verify") {
+      return handleDemoKycVerify(request, env, await sessionOf(request, env));
     }
     if (request.method === "GET" && url.pathname === "/api/deals") {
       return handleDeals(request, env);

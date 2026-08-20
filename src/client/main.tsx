@@ -1,6 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./AppV2.jsx";
+import DemoKycHelper from "./DemoKycHelper.jsx";
 import FallbackInbox from "./FallbackInbox.jsx";
 import "./styles.css";
 
@@ -18,5 +19,6 @@ createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <FallbackInbox />
     <App />
+    <DemoKycHelper />
   </React.StrictMode>
 );
