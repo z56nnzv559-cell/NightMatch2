@@ -11,10 +11,11 @@ async function readJson(path, options) {
 
 /*
  * workers.dev のデモ環境にだけ出す補助UI。
+ * 働く本人はKYC、店舗は運営確認をデモ完了できる。
  * 本番ドメインでは /api/config が demoKycAvailable=false を返すため表示されない。
  */
 export default function DemoKycHelper() {
-  const [visible, setVisible] = useState(false);
+  const [mode, setMode] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -22,19 +23,30 @@ export default function DemoKycHelper() {
     let cancelled = false;
     Promise.all([readJson("/api/config"), readJson("/api/me")])
       .then(([config, me]) => {
-        if (cancelled) return;
-        setVisible(Boolean(
-          config.demoKycAvailable &&
+        if (cancelled || !config.demoKycAvailable) return;
+
+        if (
           me?.session?.kind === "worker" &&
           !me.ageVerified &&
           me.status !== "banned"
-        ));
+        ) {
+          setMode("worker");
+          return;
+        }
+
+        if (
+          me?.session?.kind === "shop" &&
+          !me.verified &&
+          me.status !== "banned"
+        ) {
+          setMode("shop");
+        }
       })
       .catch(() => {});
     return () => { cancelled = true; };
   }, []);
 
-  if (!visible) return null;
+  if (!mode) return null;
 
   const verify = async () => {
     setBusy(true);
@@ -47,6 +59,8 @@ export default function DemoKycHelper() {
       setBusy(false);
     }
   };
+
+  const isShop = mode === "shop";
 
   return (
     <div
@@ -68,10 +82,14 @@ export default function DemoKycHelper() {
     >
       <div style={{ color: "#E2B968", fontSize: 12, marginBottom: 6 }}>デモ環境</div>
       <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 6 }}>
-        本人確認をテスト完了して求人画面へ進む
+        {isShop
+          ? "店舗確認をテスト完了して管理画面へ進む"
+          : "本人確認をテスト完了して求人画面へ進む"}
       </div>
       <div style={{ color: "#A99CB0", fontSize: 12, lineHeight: 1.6, marginBottom: 12 }}>
-        このボタンは workers.dev の実機デモだけで有効です。正式公開では実際のKYC審査に置き換わります。
+        {isShop
+          ? "このボタンは workers.dev の実機デモだけで有効です。正式公開では運営による所在地・営業許可等の確認に置き換わります。"
+          : "このボタンは workers.dev の実機デモだけで有効です。正式公開では実際のKYC審査に置き換わります。"}
       </div>
       {error && <div style={{ color: "#E57D8B", fontSize: 12, marginBottom: 8 }}>{error}</div>}
       <button
@@ -89,7 +107,11 @@ export default function DemoKycHelper() {
           opacity: busy ? .6 : 1,
         }}
       >
-        {busy ? "確認中…" : "デモ本人確認を完了する"}
+        {busy
+          ? "確認中…"
+          : isShop
+            ? "デモ店舗確認を完了する"
+            : "デモ本人確認を完了する"}
       </button>
     </div>
   );
