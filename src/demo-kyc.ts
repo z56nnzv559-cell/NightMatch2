@@ -3,9 +3,10 @@ import { isEligibleAge, type Env, type Session, uid } from "./env";
 export type DemoKycEnv = Env & { DEMO_KYC?: string };
 
 /*
- * workers.dev の実機デモでだけ使う本人確認ショートカット。
+ * workers.dev の実機デモでだけ使う確認ショートカット。
+ * 働く本人は年齢確認、店舗は運営確認をデモ完了できる。
  * 正式公開ドメインでは絶対に使えないよう、環境変数とホスト名の両方で閉じる。
- * 本番では外部KYC/手動審査に置き換え、この変数を削除する。
+ * 本番では外部KYC/運営審査に置き換え、この変数を削除する。
  */
 export async function handleDemoKycVerify(
   request: Request,
@@ -16,7 +17,39 @@ export async function handleDemoKycVerify(
   if (env.DEMO_KYC !== "true" || !hostname.endsWith(".workers.dev")) {
     return Response.json({ error: "not_available" }, { status: 404 });
   }
-  if (!session || session.kind !== "worker") {
+  if (!session) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
+
+  if (session.kind === "shop") {
+    const shop = await env.DB.prepare(
+      `SELECT verified_at, status FROM shops WHERE id=?`
+    )
+      .bind(session.shopId)
+      .first<{ verified_at: string | null; status: string }>();
+
+    if (!shop) return Response.json({ error: "shop_not_found" }, { status: 404 });
+    if (shop.status === "banned") {
+      return Response.json({ error: "account_closed" }, { status: 403 });
+    }
+    if (shop.verified_at && shop.status === "active") {
+      return Response.json({ ok: true, shopVerified: true, demo: true });
+    }
+
+    await env.DB.prepare(
+      `UPDATE shops
+          SET verified_at=COALESCE(verified_at, datetime('now')),
+              status='active',
+              license_no=COALESCE(license_no, 'DEMO-VERIFIED')
+        WHERE id=?`
+    )
+      .bind(session.shopId)
+      .run();
+
+    return Response.json({ ok: true, shopVerified: true, demo: true });
+  }
+
+  if (session.kind !== "worker") {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
 
