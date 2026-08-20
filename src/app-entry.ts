@@ -15,6 +15,7 @@ import {
   snapshotOpenJobIds,
 } from "./job-management";
 import { handleKycWebhook } from "./kyc";
+import { handleProfileGet, handleProfilePatch } from "./profile";
 import { handleSafeShiftReport } from "./reference-integrity";
 
 export type AppEnv = Env & { TURNSTILE_SITE_KEY?: string; DEMO_KYC?: string };
@@ -154,6 +155,11 @@ export default {
     }
     if (request.method === "POST" && url.pathname === "/api/kyc/demo-verify") {
       return handleDemoKycVerify(request, env, await sessionOf(request, env));
+    }
+    if (url.pathname === "/api/profile") {
+      const session = await sessionOf(request, env);
+      if (request.method === "GET") return handleProfileGet(env, session);
+      if (request.method === "PATCH") return handleProfilePatch(request, env, session);
     }
     if (request.method === "GET" && url.pathname === "/api/deals") {
       return handleDeals(request, env);
