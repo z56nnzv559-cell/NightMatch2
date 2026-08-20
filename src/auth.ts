@@ -8,9 +8,13 @@ import type { Env } from "./env";
    Workers で使えるのは WebCrypto だけなので、鍵導出は PBKDF2-SHA256。
    反復回数は hash の文字列に埋め込む（`pbkdf2-sha256$回数$塩$鍵`）。
    あとで回数を上げても、既存の利用者が入れなくならない。
+
+   Workers Free は HTTP リクエストあたり CPU 10ms のため、60万回では
+   登録/ログインがプラットフォーム側で強制終了される。Turnstile と KV の
+   試行回数制限を併用したうえで、Free 枠内に収まる回数にする。
 ===================================================================== */
 
-const ITERATIONS = 600_000;
+const ITERATIONS = 20_000;
 const enc = new TextEncoder();
 
 const b64 = (b: Uint8Array) => btoa(String.fromCharCode(...b));
@@ -60,7 +64,7 @@ export async function verifySecret(secret: string, stored: string) {
    これが無いと、応答の速さで「その email は登録済みか」が分かる。
    中身は誰も知らない値の hash なので、一致することはない。 */
 export const ABSENT_ACCOUNT_HASH =
-  "pbkdf2-sha256$600000$BCAcDUwStjuZsFxrRvItwA==$bals+Sp2/joMUcobUdUtxiPak1TOlmewvdSrloOqEdU=";
+  "pbkdf2-sha256$20000$O8BjLNyI0Vvil3683AkGLw==$Xqq2njELvKodX03Z+CXBG2jbM+w4OHMbwoH7zTiHnto=";
 
 /* ------------------------------------------------------------ 合言葉 */
 
