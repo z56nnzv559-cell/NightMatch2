@@ -79,6 +79,7 @@
 
   "vars": {
     "APP_ENV": "production",
+    "DEMO_KYC": "true",
     "VAPID_SUBJECT": "mailto:ops@example.jp",
     "ACCESS_TEAM_DOMAIN": "<team>.cloudflareaccess.com",
     "ACCESS_AUD": "<audience-tag>",
