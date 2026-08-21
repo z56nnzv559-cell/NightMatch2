@@ -30,6 +30,7 @@ export async function storePhoto(
   | { ok: false; error: string; status: number }
 > {
   const faceMode = String(form.get("face_mode") ?? "none") as FaceMode;
+  const makePrimary = String(form.get("make_primary") ?? "") === "1";
   const original = form.get("original");
   const masked = form.get("masked");
 
@@ -84,12 +85,24 @@ export async function storePhoto(
     });
   }
 
-  await env.DB.prepare(
-    `INSERT INTO photos (id, worker_id, origin_key, variant_id, face_mode, is_primary)
-     VALUES (?, ?, ?, ?, ?, COALESCE((SELECT 0 FROM photos WHERE worker_id=? LIMIT 1), 1))`
-  )
-    .bind(photoId, workerId, originKey, variantKey, faceMode, workerId)
-    .run();
+  if (makePrimary) {
+    /* プロフィール編集からの差し替えは、新しい写真をメインにする。
+       既存のギャラリー写真は削除せず、primary フラグだけを付け替える。 */
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE photos SET is_primary=0 WHERE worker_id=?`).bind(workerId),
+      env.DB.prepare(
+        `INSERT INTO photos (id, worker_id, origin_key, variant_id, face_mode, is_primary)
+         VALUES (?, ?, ?, ?, ?, 1)`
+      ).bind(photoId, workerId, originKey, variantKey, faceMode),
+    ]);
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO photos (id, worker_id, origin_key, variant_id, face_mode, is_primary)
+       VALUES (?, ?, ?, ?, ?, COALESCE((SELECT 0 FROM photos WHERE worker_id=? LIMIT 1), 1))`
+    )
+      .bind(photoId, workerId, originKey, variantKey, faceMode, workerId)
+      .run();
+  }
 
   return { ok: true, photoId };
 }
