@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 
 const TYPES = ["キャバクラ", "ラウンジ", "ガールズバー", "スナック", "コンカフェ"];
 const COLORS = {
@@ -15,7 +15,9 @@ const COLORS = {
 
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
-  if (options.body && !headers.has("content-type")) headers.set("content-type", "application/json");
+  if (options.body && !(options.body instanceof FormData) && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
   const res = await fetch(path, { credentials: "same-origin", ...options, headers });
   const text = await res.text();
   let body = {};
@@ -38,6 +40,8 @@ function messageFor(error) {
   if (code === "invalid_business_type") return "業種を選択肢から選んでください。";
   if (code === "invalid_profile_field") return "入力内容が長すぎるか、必須項目が未入力です。";
   if (code === "fee_plan_not_found") return "この業種の料金設定が見つかりません。運営側の設定を確認してください。";
+  if (code === "unsupported_image") return "写真は8MB以下のJPEG・PNG・WebPを選んでください。";
+  if (code === "original_required") return "アップロードする写真を選んでください。";
   if (code === "unauthorized") return "ログイン状態が切れています。もう一度ログインしてください。";
   return `保存できませんでした: ${code}`;
 }
@@ -71,8 +75,9 @@ export default function ProfileEditor() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [photoPreview, setPhotoPreview] = useState("");
 
-  const refreshSession = async () => {
+  const refreshSession = useCallback(async () => {
     try {
       const me = await api("/api/me");
       setSession(me?.session || null);
@@ -80,7 +85,23 @@ export default function ProfileEditor() {
     } catch {
       return null;
     }
-  };
+  }, []);
+
+  const openEditor = useCallback(async () => {
+    setError("");
+    setLoading(true);
+    try {
+      const current = await refreshSession();
+      if (!current) return setSession(null);
+      const data = await api("/api/profile");
+      setProfile(data.profile);
+      setOpen(true);
+    } catch (err) {
+      setError(messageFor(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [refreshSession]);
 
   useEffect(() => {
     let cancelled = false;
@@ -100,29 +121,76 @@ export default function ProfileEditor() {
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("pageshow", onFocus);
     };
-  }, []);
+  }, [refreshSession]);
 
-  const openEditor = async () => {
-    setError("");
-    setLoading(true);
-    try {
-      const current = await refreshSession();
-      if (!current) return setSession(null);
-      const data = await api("/api/profile");
-      setProfile(data.profile);
-      setOpen(true);
-    } catch (err) {
-      setError(messageFor(err));
-    } finally {
-      setLoading(false);
-    }
-  };
+  useEffect(() => {
+    if (!session) return undefined;
+
+    let launcher = null;
+    const mountLauncher = () => {
+      if (launcher?.isConnected) return;
+      const headerInner = document.querySelector("header > div");
+      if (!headerInner) return;
+
+      const existing = headerInner.querySelector('[data-nightmatch-profile-launcher="1"]');
+      if (existing) {
+        launcher = existing;
+        return;
+      }
+
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.nightmatchProfileLauncher = "1";
+      button.textContent = "プロフィール編集";
+      button.setAttribute("aria-label", "プロフィールを編集");
+      Object.assign(button.style, {
+        marginLeft: "auto",
+        marginRight: "12px",
+        border: `1px solid ${COLORS.gold}`,
+        borderRadius: "999px",
+        padding: "7px 10px",
+        background: "transparent",
+        color: COLORS.gold,
+        fontSize: "11px",
+        fontWeight: "700",
+        whiteSpace: "nowrap",
+        flexShrink: "0",
+      });
+      button.addEventListener("click", openEditor);
+
+      const logout = Array.from(headerInner.querySelectorAll("button")).find((item) =>
+        String(item.textContent || "").includes("ログアウト")
+      );
+      if (logout) headerInner.insertBefore(button, logout);
+      else headerInner.appendChild(button);
+      launcher = button;
+    };
+
+    mountLauncher();
+    const observer = new MutationObserver(mountLauncher);
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    return () => {
+      observer.disconnect();
+      if (launcher?.dataset?.nightmatchProfileLauncher === "1") {
+        launcher.removeEventListener("click", openEditor);
+        launcher.remove();
+      }
+    };
+  }, [session, openEditor]);
+
+  useEffect(() => () => {
+    if (photoPreview) URL.revokeObjectURL(photoPreview);
+  }, [photoPreview]);
 
   const save = async (e) => {
     e.preventDefault();
     setSaving(true);
     setError("");
-    const data = Object.fromEntries(new FormData(e.currentTarget));
+    const form = new FormData(e.currentTarget);
+    const data = Object.fromEntries(form);
+    const selectedPhoto = form.get("photo");
+
     try {
       let payload;
       if (profile.role === "worker") {
@@ -148,9 +216,22 @@ export default function ProfileEditor() {
         method: "PATCH",
         body: JSON.stringify(payload),
       });
+
+      let photoSaved = false;
+      if (profile.role === "worker" && selectedPhoto instanceof File && selectedPhoto.size > 0) {
+        const photoForm = new FormData();
+        photoForm.set("original", selectedPhoto);
+        photoForm.set("face_mode", String(data.photoFaceMode || "open"));
+        photoForm.set("make_primary", "1");
+        await api("/api/me/photos", { method: "POST", body: photoForm });
+        photoSaved = true;
+      }
+
       setProfile(result.profile);
       if (result.requiresReverification) {
         alert("プロフィールを保存しました。エリアまたは業種を変更したため、店舗確認が再度必要です。デモ環境ではデモ店舗確認をもう一度実行できます。");
+      } else if (photoSaved) {
+        alert("プロフィールと写真を保存しました。");
       } else {
         alert("プロフィールを保存しました。");
       }
@@ -165,28 +246,6 @@ export default function ProfileEditor() {
 
   return (
     <>
-      <button
-        type="button"
-        onClick={openEditor}
-        disabled={loading}
-        style={{
-          position: "fixed",
-          right: 14,
-          top: 78,
-          zIndex: 80,
-          border: `1px solid ${COLORS.gold}`,
-          borderRadius: 999,
-          padding: "9px 13px",
-          background: "rgba(27,22,32,.96)",
-          color: COLORS.gold,
-          fontSize: 12,
-          fontWeight: 700,
-          boxShadow: "0 8px 24px rgba(0,0,0,.25)",
-        }}
-      >
-        {loading ? "読込中…" : "プロフィール編集"}
-      </button>
-
       {open && profile && (
         <div
           role="dialog"
@@ -223,6 +282,33 @@ export default function ProfileEditor() {
             <form onSubmit={save} style={{ display: "grid", gap: 14 }}>
               {profile.role === "worker" ? (
                 <>
+                  <div style={{ border: `1px solid ${COLORS.line}`, borderRadius: 16, padding: 14, display: "grid", gap: 10, background: COLORS.surface2 }}>
+                    <div>
+                      <div style={{ color: COLORS.text, fontSize: 14, fontWeight: 700 }}>プロフィール写真</div>
+                      <div style={{ color: COLORS.sub, fontSize: 11, lineHeight: 1.5, marginTop: 3 }}>新しい写真を選ぶと、保存時にメイン写真として登録されます。</div>
+                    </div>
+                    {photoPreview && (
+                      <img src={photoPreview} alt="選択したプロフィール写真" style={{ width: 112, height: 112, borderRadius: 14, objectFit: "cover", border: `1px solid ${COLORS.line}` }} />
+                    )}
+                    <input
+                      name="photo"
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      onChange={(event) => {
+                        const file = event.currentTarget.files?.[0];
+                        setPhotoPreview(file ? URL.createObjectURL(file) : "");
+                      }}
+                      style={{ ...inputStyle, padding: "10px 11px", fontSize: 13 }}
+                    />
+                    <Label title="写真の公開方法" hint="顔を出したくない場合は、ぼかしまたは非公開を選べます">
+                      <select name="photoFaceMode" defaultValue="open" style={inputStyle}>
+                        <option value="open">顔出しで公開</option>
+                        <option value="blur">強めにぼかして公開</option>
+                        <option value="none">体入成立まで非公開</option>
+                      </select>
+                    </Label>
+                  </div>
+
                   <Label title="ニックネーム"><input name="nickname" required maxLength={40} defaultValue={profile.nickname} style={inputStyle} /></Label>
                   <Label title="生年月日" hint={profile.ageVerified ? "本人確認済みのため変更できません" : "本人確認前のみ変更できます"}>
                     <input name="birthDate" type="date" required defaultValue={profile.birthDate} disabled={profile.ageVerified} style={{ ...inputStyle, opacity: profile.ageVerified ? .55 : 1 }} />
