@@ -5,7 +5,7 @@ import DemoKycHelper from "./DemoKycHelper.jsx";
 import FallbackInbox from "./FallbackInbox.jsx";
 import ProfileEditor from "./ProfileEditor.jsx";
 import JobFormFix from "./JobFormFix.jsx";
-import MarketplaceReview from "./MarketplaceReview.jsx";
+import MarketplaceGallery from "./MarketplaceGallery.jsx";
 import "./styles.css";
 
 /* 受信側が無いとWeb Pushが成功しても画面には何も出ない。
@@ -24,7 +24,7 @@ createRoot(document.getElementById("root")!).render(
     <App />
     <ProfileEditor />
     <JobFormFix />
-    <MarketplaceReview />
+    <MarketplaceGallery />
     <DemoKycHelper />
   </React.StrictMode>
 );
