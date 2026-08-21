@@ -10,10 +10,10 @@ async function api(path) {
 }
 
 const ICON_STYLE = {
-  width: "54px",
-  height: "54px",
-  flex: "0 0 54px",
-  borderRadius: "14px",
+  width: "96px",
+  height: "96px",
+  flex: "0 0 96px",
+  borderRadius: "18px",
   border: "1px solid #372E40",
   background: "#241D2A",
 };
@@ -39,7 +39,7 @@ export default function ShopPhotoListingDecorator() {
         Object.assign(header.style, {
           display: "flex",
           alignItems: "center",
-          gap: "11px",
+          gap: "14px",
           minWidth: "0",
         });
 
@@ -61,7 +61,7 @@ export default function ShopPhotoListingDecorator() {
             display: "grid",
             placeItems: "center",
             color: "#E2B968",
-            fontSize: "20px",
+            fontSize: "30px",
             fontWeight: "850",
           });
         }
