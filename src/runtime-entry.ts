@@ -3,6 +3,7 @@ import type { NotifyMessage, PayoutMessage } from "./env";
 import { handleReviewResolveRuntime } from "./admin-review-runtime";
 import { flushFallbackEmails } from "./email-fallback";
 import { consumePayoutBatch } from "./payout-runtime";
+import { handleWorkerDirectory } from "./worker-directory";
 
 const REQUIRED_TABLES = [
   "workers",
@@ -69,6 +70,31 @@ function classifyRuntimeError(error: unknown) {
   return "internal_server_error";
 }
 
+async function dedupeJobDirectory(request: Request, env: AppEnv, ctx: ExecutionContext) {
+  const response = await app.fetch(request, env, ctx);
+  if (!response.ok) return response;
+
+  let payload: any;
+  try {
+    payload = await response.json();
+  } catch {
+    return response;
+  }
+  if (!Array.isArray(payload?.jobs)) return Response.json(payload, { status: response.status });
+
+  // 女性側には同じ店舗アカウントを何枚も並べない。
+  // APIの並び順を尊重し、その店舗で最初に来た求人を代表として表示する。
+  const seen = new Set<string>();
+  const jobs = payload.jobs.filter((job: any) => {
+    const key = String(job?.shop_id || job?.shop_name || job?.id || "");
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  return Response.json({ ...payload, jobs }, { status: response.status });
+}
+
 export default {
   async fetch(request: Request, env: AppEnv, ctx: ExecutionContext) {
     const url = new URL(request.url);
@@ -82,6 +108,15 @@ export default {
       if (request.method === "POST" && review) {
         return await handleReviewResolveRuntime(request, env, decodeURIComponent(review[1]));
       }
+
+      if (request.method === "GET" && url.pathname === "/api/workers") {
+        return await handleWorkerDirectory(request, env);
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/jobs") {
+        return await dedupeJobDirectory(request, env, ctx);
+      }
+
       return await app.fetch(request, env, ctx);
     } catch (error) {
       console.error("NightMatch request failed", {
