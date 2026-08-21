@@ -286,7 +286,7 @@ function AuthScreen({ siteKey, onAuthenticated }) {
         </div>
 
         <div className="grid grid-cols-2 gap-2 rounded-xl p-1" style={{ background: COLORS.surface }}>
-          {[['worker', '働く本人'], ['shop', '店舗']].map(([value, label]) => (
+          {[["worker", "働く本人"], ["shop", "店舗"]].map(([value, label]) => (
             <button key={value} onClick={() => { setRole(value); setToken(""); }} className="rounded-lg py-2 text-sm" style={{ background: role === value ? COLORS.surface2 : "transparent", color: role === value ? COLORS.gold : COLORS.sub }}>
               {label}
             </button>
@@ -503,18 +503,24 @@ function ShopDashboard({ me, onLogout }) {
   const [workers, setWorkers] = useState([]);
   const [jobs, setJobs] = useState([]);
   const [rewards, setRewards] = useState({ confirmed: 0, accrued: 0, funnel: {} });
+  const [shopProfile, setShopProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [scout, setScout] = useState(null);
 
   const reload = async () => {
     if (!me.verified) return setLoading(false);
-    const [dealData, workerData, jobData, rewardData] = await Promise.all([
-      api("/api/deals"), api("/api/workers?limit=30"), api("/api/shop/jobs"), api("/api/shop/rewards"),
+    const [dealData, workerData, jobData, rewardData, profileData] = await Promise.all([
+      api("/api/deals"),
+      api("/api/workers?limit=30"),
+      api("/api/shop/jobs"),
+      api("/api/shop/rewards"),
+      api("/api/profile"),
     ]);
     setDeals(dealData.deals || []);
     setWorkers(workerData.workers || []);
     setJobs(jobData.jobs || []);
     setRewards(rewardData);
+    setShopProfile(profileData.profile || null);
     setLoading(false);
   };
 
@@ -542,13 +548,14 @@ function ShopDashboard({ me, onLogout }) {
 
   const createJob = async (e) => {
     e.preventDefault();
-    const data = Object.fromEntries(new FormData(e.currentTarget));
+    const form = e.currentTarget;
+    const data = Object.fromEntries(new FormData(form));
     try {
       await api("/api/jobs", {
         method: "POST",
         body: JSON.stringify({
           area: data.area,
-          businessType: data.businessType,
+          businessType: shopProfile?.businessType || data.businessType,
           trialPay: Number(data.trialPay),
           hourlyMin: Number(data.hourlyMin),
           hourlyMax: Number(data.hourlyMax),
@@ -557,8 +564,9 @@ function ShopDashboard({ me, onLogout }) {
           perks: PERKS.filter((p) => data[`perk:${p}`] === "on"),
         }),
       });
-      e.currentTarget.reset();
+      form.reset();
       await reload();
+      alert("求人を掲載しました。");
     } catch (err) {
       alert(`求人を作成できませんでした: ${err.message}`);
     }
@@ -624,7 +632,7 @@ function ShopDashboard({ me, onLogout }) {
           <Card>
             <form className="grid gap-3 md:grid-cols-2" onSubmit={createJob}>
               <Field name="area" label="エリア" required placeholder="福岡・中洲" />
-              <SelectField name="businessType" label="業種" defaultValue="ラウンジ">{TYPES.map((t) => <option key={t}>{t}</option>)}</SelectField>
+              <Field name="businessType" label="業種（店舗プロフィールに固定）" value={shopProfile?.businessType || ""} readOnly />
               <Field name="trialPay" label="体入時の女性への支給額" type="number" min="0" required />
               <Field name="hourlyMin" label="時給 下限" type="number" min="0" required />
               <Field name="hourlyMax" label="時給 上限" type="number" min="0" required />
