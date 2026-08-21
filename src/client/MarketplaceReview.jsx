@@ -94,6 +94,18 @@ function WorkerPanel() {
   };
   useEffect(() => { load(); }, [type, sort]);
 
+  // 同じ店舗アカウントの求人は1枚だけ表示する。
+  // API側でも重複排除するが、古いキャッシュや一時的な二重データにも画面側で耐える。
+  const displayJobs = useMemo(() => {
+    const seen = new Set();
+    return jobs.filter((job) => {
+      const key = String(job.shop_id || job.shop_name || job.id || "");
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [jobs]);
+
   const apply = async (jobId) => {
     const trialDate = prompt("希望する体入日があれば YYYY-MM-DD で入力してください（未定なら空欄）");
     try { await api("/api/deals/apply", { method: "POST", body: JSON.stringify({ jobId, trialDate: trialDate || undefined }) }); alert("応募しました。店舗からの返信をお待ちください。"); }
@@ -103,13 +115,13 @@ function WorkerPanel() {
   if (!target) return null;
   return createPortal(
     <div style={{ display: "grid", gap: 12, color: C.text }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "end", gap: 12 }}><div><h2 style={{ margin: 0, fontSize: 24 }}>求人を探す</h2><div style={{ marginTop: 4, color: C.sub, fontSize: 12 }}>掲載中の店舗求人を一覧表示しています</div></div><div style={{ color: C.gold, fontSize: 14 }}>{jobs.length}件</div></div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "end", gap: 12 }}><div><h2 style={{ margin: 0, fontSize: 24 }}>求人を探す</h2><div style={{ marginTop: 4, color: C.sub, fontSize: 12 }}>掲載中の店舗求人を一覧表示しています</div></div><div style={{ color: C.gold, fontSize: 14 }}>{displayJobs.length}件</div></div>
       <Card><div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))" }}><Label title="業種"><select value={type} onChange={(e) => setType(e.target.value)} style={inputStyle()}><option value="">すべて</option>{TYPES.map((t) => <option key={t}>{t}</option>)}</select></Label><Label title="並び順"><select value={sort} onChange={(e) => setSort(e.target.value)} style={inputStyle()}><option value="new">新着順</option><option value="pay">時給が高い順</option><option value="trial">体入支給額が高い順</option></select></Label></div></Card>
       {loading && <Notice>求人を読み込んでいます…</Notice>}
       {error && <Notice danger>求人一覧を取得できませんでした：{error}</Notice>}
-      {!loading && !error && jobs.length === 0 && <Notice>現在この条件で掲載中の求人はありません。業種を「すべて」にすると見つかる場合があります。</Notice>}
+      {!loading && !error && displayJobs.length === 0 && <Notice>現在この条件で掲載中の求人はありません。業種を「すべて」にすると見つかる場合があります。</Notice>}
       <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))" }}>
-        {jobs.map((job) => <Card key={job.id}><div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}><div><div style={{ fontSize: 18, fontWeight: 750 }}>{job.shop_name}</div><div style={{ marginTop: 4, color: C.sub, fontSize: 12 }}>{job.area} · {job.business_type}{job.station ? ` · ${job.station}` : ""}</div></div>{job.verified_at && <span style={{ color: C.mint, fontSize: 11 }}>確認済み</span>}</div><div style={{ marginTop: 14, color: C.gold, fontSize: 24, fontWeight: 750 }}>{yen(job.trial_pay)} <span style={{ color: C.sub, fontSize: 11, fontWeight: 400 }}>体入支給</span></div><div style={{ marginTop: 4, fontSize: 14 }}>時給 {yen(job.hourly_min)}〜{yen(job.hourly_max)}</div>{job.hours && <div style={{ marginTop: 4, color: C.sub, fontSize: 12 }}>勤務時間 {job.hours}</div>}<div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 10 }}>{list(job.perks).map((p) => <span key={p} style={{ border: `1px solid ${C.line}`, borderRadius: 999, padding: "4px 8px", color: C.sub, fontSize: 10 }}>{p}</span>)}</div><div style={{ marginTop: 12 }}><Action onClick={() => apply(job.id)}>この求人に応募する</Action></div></Card>)}
+        {displayJobs.map((job) => <Card key={job.id}><div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}><div><div style={{ fontSize: 18, fontWeight: 750 }}>{job.shop_name}</div><div style={{ marginTop: 4, color: C.sub, fontSize: 12 }}>{job.area} · {job.business_type}{job.station ? ` · ${job.station}` : ""}</div></div>{job.verified_at && <span style={{ color: C.mint, fontSize: 11 }}>確認済み</span>}</div><div style={{ marginTop: 14, color: C.gold, fontSize: 24, fontWeight: 750 }}>{yen(job.trial_pay)} <span style={{ color: C.sub, fontSize: 11, fontWeight: 400 }}>体入支給</span></div><div style={{ marginTop: 4, fontSize: 14 }}>時給 {yen(job.hourly_min)}〜{yen(job.hourly_max)}</div>{job.hours && <div style={{ marginTop: 4, color: C.sub, fontSize: 12 }}>勤務時間 {job.hours}</div>}<div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 10 }}>{list(job.perks).map((p) => <span key={p} style={{ border: `1px solid ${C.line}`, borderRadius: 999, padding: "4px 8px", color: C.sub, fontSize: 10 }}>{p}</span>)}</div><div style={{ marginTop: 12 }}><Action onClick={() => apply(job.id)}>この求人に応募する</Action></div></Card>)}
       </div>
     </div>,
     target
@@ -179,13 +191,34 @@ export default function MarketplaceReview() {
   const [me, setMe] = useState(null);
   useEffect(() => {
     let cancelled = false;
-    const load = () => api("/api/me").then((value) => { if (!cancelled) setMe(value); }).catch(() => {});
+    const load = () => api("/api/me")
+      .then((value) => { if (!cancelled) setMe(value); })
+      .catch(() => { if (!cancelled) setMe(null); });
+
+    const onClick = (event) => {
+      const button = event.target?.closest?.("button");
+      if (button && String(button.textContent || "").includes("ログアウト")) {
+        // ログアウトを押した瞬間に一覧を消す。ログイン画面へ持ち越さない。
+        setMe(null);
+      }
+    };
+
     load();
     const onFocus = () => load();
     window.addEventListener("focus", onFocus);
     window.addEventListener("pageshow", onFocus);
-    return () => { cancelled = true; window.removeEventListener("focus", onFocus); window.removeEventListener("pageshow", onFocus); };
+    document.addEventListener("click", onClick, true);
+    const timer = setInterval(load, 1500);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("pageshow", onFocus);
+      document.removeEventListener("click", onClick, true);
+    };
   }, []);
+
   if (!me?.session) return null;
   if (me.session.kind === "worker") return me.ageVerified ? <WorkerPanel /> : null;
   return me.verified ? <ShopPanel /> : null;
