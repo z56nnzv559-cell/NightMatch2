@@ -21,10 +21,11 @@ const ICON_STYLE = {
 export default function ShopPhotoListingDecorator() {
   useEffect(() => {
     let cancelled = false;
+    let ready = false;
     let photos = new Map();
 
     const decorate = () => {
-      if (cancelled) return;
+      if (cancelled || !ready) return;
 
       document.querySelectorAll(".nm2-job").forEach((card) => {
         if (card.dataset.nmShopPhotoDecorated === "1") return;
@@ -87,9 +88,11 @@ export default function ShopPhotoListingDecorator() {
           .filter((job) => job.shop_photo_url)
           .map((job) => [String(job.shop_name || "").trim(), job.shop_photo_url])
       );
+      ready = true;
       decorate();
     }).catch(() => {
       // 写真取得に失敗しても、一覧には店舗アイコンのプレースホルダーを表示する。
+      ready = true;
       decorate();
     });
 
