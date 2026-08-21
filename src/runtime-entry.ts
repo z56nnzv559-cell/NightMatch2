@@ -2,6 +2,7 @@ import app, { type AppEnv } from "./app-entry";
 import type { NotifyMessage, PayoutMessage } from "./env";
 import { verifyImageSig, verifySession } from "./env";
 import { handleReviewResolveRuntime } from "./admin-review-runtime";
+import { ensureDemoData } from "./demo-seed";
 import { flushFallbackEmails } from "./email-fallback";
 import { consumePayoutBatch } from "./payout-runtime";
 import { servePhoto } from "./photos";
@@ -119,8 +120,6 @@ async function dedupeJobDirectory(request: Request, env: AppEnv, ctx: ExecutionC
   }
   if (!Array.isArray(payload?.jobs)) return Response.json(payload, { status: response.status });
 
-  // 女性側には同じ店舗アカウントを何枚も並べない。
-  // APIの並び順を尊重し、その店舗で最初に来た求人を代表として表示する。
   const seen = new Set<string>();
   const jobs = payload.jobs.filter((job: any) => {
     const key = String(job?.shop_id || job?.shop_name || job?.id || "");
@@ -144,8 +143,6 @@ async function dedupeShopJobs(request: Request, env: AppEnv, ctx: ExecutionConte
   }
   if (!Array.isArray(payload?.jobs)) return Response.json(payload, { status: response.status });
 
-  // 自店求人では「内容が同じ求人」だけを重複とみなす。
-  // published_at DESC の先頭を残すので、誤って二重登録された古い方は画面に出さない。
   const seen = new Set<string>();
   const jobs = payload.jobs.filter((job: any) => {
     const key = jobFingerprint(job);
@@ -191,8 +188,6 @@ async function existingDuplicateJob(request: Request, env: AppEnv) {
 }
 
 async function serveSignedPhoto(request: Request, env: AppEnv, photoId: string) {
-  // IMG_SIGNING_KEY が未設定の環境では、一覧URL生成側と同じく JWT_SECRET を使う。
-  // 生成と検証で別の鍵を使うと、正しい写真でも403になって壊れた画像表示になる。
   const key = env.IMG_SIGNING_KEY || env.JWT_SECRET;
   const url = new URL(request.url);
   const ok = await verifyImageSig(
@@ -214,6 +209,10 @@ export default {
     }
 
     try {
+      if (env.DEMO_KYC === "true" && url.hostname.endsWith(".workers.dev")) {
+        await ensureDemoData(env);
+      }
+
       const image = url.pathname.match(/^\/img\/([^/]+)$/);
       if (request.method === "GET" && image) {
         return await serveSignedPhoto(request, env, decodeURIComponent(image[1]));
@@ -262,11 +261,6 @@ export default {
       return consumePayoutBatch(batch as MessageBatch<PayoutMessage>, env);
     }
 
-    /*
-     * 通知キューがPush未達をnotification_fallbacksへ記録した直後に、
-     * 店舗/運営向けメールを試す。メール障害は通知キューのackを巻き戻さず、
-     * DB行を未送信のまま残してcronで再試行する。
-     */
     await app.queue(batch, env);
     await flushFallbackEmails(env).catch((error) => {
       console.error("fallback email flush after notification queue failed", error);
