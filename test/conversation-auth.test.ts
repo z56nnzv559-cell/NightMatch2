@@ -7,6 +7,15 @@ async function workerCookie(workerId: string) {
   return `akari=${await signSession(env.JWT_SECRET, { kind: "worker", workerId })}`;
 }
 
+async function shopCookie(shopId: string) {
+  return `akari=${await signSession(env.JWT_SECRET, {
+    kind: "shop",
+    shopId,
+    memberId: "member-test",
+    role: "owner",
+  })}`;
+}
+
 it("案件の当事者でなければWebSocketを開けない", async () => {
   const mine = await seedDeal();
   const other = await seedDeal();
@@ -49,7 +58,7 @@ it("クライアントがfromとdealIdを偽っても接続時の本人情報で
   });
   expect(historyRes.status).toBe(200);
   const history = await historyRes.json<{
-    messages: { dealId: string; from: string; body: string }[];
+    messages: { dealId: string; from: string; body: string; at: number; read: boolean }[];
   }>();
   const message = history.messages.at(-1);
 
@@ -58,6 +67,7 @@ it("クライアントがfromとdealIdを偽っても接続時の本人情報で
     from: `worker:${f.workerId}`,
     body: "LINE ID @nightmatch",
     at: expect.any(Number),
+    read: false,
   });
 
   const signals = await env.DB.prepare(
@@ -68,6 +78,47 @@ it("クライアントがfromとdealIdを偽っても接続時の本人情報で
     detail: `worker:${f.workerId}`,
   });
   expect(signals.results.some((s) => s.deal_id === "dl_someone_else")).toBe(false);
+});
+
+it("相手がトークを開いて既読通知を送ると履歴に既読が保存される", async () => {
+  const f = await seedDeal();
+  const id = env.CONVERSATION.idFromName(f.dealId);
+
+  const seeded = await env.CONVERSATION.get(id).fetch("https://do/seed", {
+    method: "POST",
+    body: JSON.stringify({
+      dealId: f.dealId,
+      from: `shop:${f.shopId}`,
+      body: "確認お願いします",
+    }),
+  });
+  expect(seeded.status).toBe(200);
+
+  const workerSocketRes = await SELF.fetch(`https://akari.test/api/deals/${f.dealId}/socket`, {
+    headers: {
+      cookie: await workerCookie(f.workerId),
+      upgrade: "websocket",
+    },
+  });
+  expect(workerSocketRes.status).toBe(101);
+  const workerSocket = workerSocketRes.webSocket;
+  expect(workerSocket).toBeTruthy();
+  workerSocket!.accept();
+  workerSocket!.send(JSON.stringify({ type: "read" }));
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  const historyRes = await SELF.fetch(`https://akari.test/api/deals/${f.dealId}/messages`, {
+    headers: { cookie: await shopCookie(f.shopId) },
+  });
+  expect(historyRes.status).toBe(200);
+  const history = await historyRes.json<{
+    messages: { body: string; read: boolean }[];
+  }>();
+  expect(history.messages.at(-1)).toMatchObject({
+    body: "確認お願いします",
+    read: true,
+  });
 });
 
 it("DOのseedも案件と無関係な話者を拒否する", async () => {
