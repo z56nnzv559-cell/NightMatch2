@@ -3,6 +3,7 @@ import { verifySession } from "./env";
 
 const MAX_BYTES = 8 * 1024 * 1024;
 const ALLOWED = new Set(["image/jpeg", "image/png", "image/webp"]);
+const MAX_GALLERY_ITEMS = 20;
 
 function cookieValue(request: Request, name: string) {
   const cookies = request.headers.get("cookie") ?? "";
@@ -17,8 +18,52 @@ async function sessionOf(request: Request, env: Env): Promise<Session | null> {
   return verifySession(env.JWT_SECRET, cookieValue(request, "akari"));
 }
 
+/* 既存の1枚保存キーは後方互換のため残す。 */
 export function shopPhotoKey(shopId: string) {
   return `shop-profiles/${shopId}.webp`;
+}
+
+function shopGalleryPrefix(shopId: string) {
+  return `shop-profiles/${shopId}/`;
+}
+
+function shopGalleryKey(shopId: string, photoId: string) {
+  return `${shopGalleryPrefix(shopId)}${photoId}.webp`;
+}
+
+function photoUrl(shopId: string, photoId: string | null, version: string) {
+  const target = photoId ? `${shopId}~${photoId}` : shopId;
+  return `/shop-img/${encodeURIComponent(target)}?v=${encodeURIComponent(version || "1")}`;
+}
+
+async function listShopPhotos(env: Env, shopId: string) {
+  const listed = await env.ORIGINALS.list({
+    prefix: shopGalleryPrefix(shopId),
+    limit: MAX_GALLERY_ITEMS,
+  });
+
+  const gallery = listed.objects
+    .filter((obj) => obj.key.endsWith(".webp"))
+    .sort((a, b) => b.uploaded.getTime() - a.uploaded.getTime())
+    .map((obj) => {
+      const filename = obj.key.slice(shopGalleryPrefix(shopId).length);
+      const id = filename.replace(/\.webp$/u, "");
+      return {
+        id,
+        url: photoUrl(shopId, id, obj.etag || String(obj.uploaded.getTime())),
+      };
+    });
+
+  /* 旧形式で登録済みの店舗写真もギャラリーの最後に残す。 */
+  const legacy = await env.ORIGINALS.head(shopPhotoKey(shopId));
+  if (legacy) {
+    gallery.push({
+      id: "legacy",
+      url: photoUrl(shopId, null, legacy.etag || "legacy"),
+    });
+  }
+
+  return gallery;
 }
 
 export async function handleShopPhoto(request: Request, env: Env) {
@@ -27,12 +72,11 @@ export async function handleShopPhoto(request: Request, env: Env) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  const key = shopPhotoKey(session.shopId);
-
   if (request.method === "GET") {
-    const existing = await env.ORIGINALS.head(key);
+    const photos = await listShopPhotos(env, session.shopId);
     return Response.json({
-      photoUrl: existing ? `/shop-img/${encodeURIComponent(session.shopId)}?v=${encodeURIComponent(existing.etag || String(Date.now()))}` : null,
+      photoUrl: photos[0]?.url ?? null,
+      photos,
     });
   }
 
@@ -53,22 +97,32 @@ export async function handleShopPhoto(request: Request, env: Env) {
     .transform({ width: 1400 })
     .output({ format: "image/webp", quality: 84 });
 
+  const photoId = `${Date.now().toString(36)}-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  const key = shopGalleryKey(session.shopId, photoId);
   await env.ORIGINALS.put(key, out.image(), {
     httpMetadata: { contentType: "image/webp" },
-    customMetadata: { shopId: session.shopId },
+    customMetadata: { shopId: session.shopId, photoId },
   });
 
+  const photos = await listShopPhotos(env, session.shopId);
   return Response.json({
     ok: true,
-    photoUrl: `/shop-img/${encodeURIComponent(session.shopId)}?v=${Date.now()}`,
+    photoUrl: photos[0]?.url ?? null,
+    photos,
   });
 }
 
-export async function serveShopPhoto(env: Env, shopId: string) {
+export async function serveShopPhoto(env: Env, rawId: string) {
+  const [shopId, photoId] = rawId.split("~", 2);
   if (!/^[A-Za-z0-9_-]{3,100}$/.test(shopId)) {
     return new Response("not found", { status: 404 });
   }
-  const obj = await env.ORIGINALS.get(shopPhotoKey(shopId));
+  if (photoId && !/^[A-Za-z0-9_-]{3,100}$/.test(photoId)) {
+    return new Response("not found", { status: 404 });
+  }
+
+  const key = photoId ? shopGalleryKey(shopId, photoId) : shopPhotoKey(shopId);
+  const obj = await env.ORIGINALS.get(key);
   if (!obj) return new Response("not found", { status: 404 });
 
   return new Response(obj.body, {
@@ -80,19 +134,24 @@ export async function serveShopPhoto(env: Env, shopId: string) {
 }
 
 export async function addShopPhotosToJobs(env: Env, jobs: any[]) {
-  const cache = new Map<string, string | null>();
+  const cache = new Map<string, { photoUrl: string | null; photoUrls: string[] }>();
   return Promise.all(
     jobs.map(async (job) => {
       const shopId = String(job?.shop_id || "");
       if (!shopId) return job;
       if (!cache.has(shopId)) {
-        const existing = await env.ORIGINALS.head(shopPhotoKey(shopId));
-        cache.set(
-          shopId,
-          existing ? `/shop-img/${encodeURIComponent(shopId)}?v=${encodeURIComponent(existing.etag || "1")}` : null
-        );
+        const photos = await listShopPhotos(env, shopId);
+        cache.set(shopId, {
+          photoUrl: photos[0]?.url ?? null,
+          photoUrls: photos.map((photo) => photo.url),
+        });
       }
-      return { ...job, shop_photo_url: cache.get(shopId) };
+      const entry = cache.get(shopId)!;
+      return {
+        ...job,
+        shop_photo_url: entry.photoUrl,
+        shop_photo_urls: entry.photoUrls,
+      };
     })
   );
 }

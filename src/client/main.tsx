@@ -9,6 +9,7 @@ import MarketplaceGalleryV2 from "./MarketplaceGalleryV2.jsx";
 import ProfileEditor from "./ProfileEditor.jsx";
 import ProfileFormEnhancer from "./ProfileFormEnhancer.jsx";
 import ShopPhotoListingDecorator from "./ShopPhotoListingDecorator.jsx";
+import WorkerPhotoGalleryDecorator from "./WorkerPhotoGalleryDecorator.jsx";
 import "./styles.css";
 
 /* 受信側が無いとWeb Pushが成功しても画面には何も出ない。
@@ -30,6 +31,7 @@ createRoot(document.getElementById("root")!).render(
     <JobFormFix />
     <MarketplaceGalleryV2 />
     <ShopPhotoListingDecorator />
+    <WorkerPhotoGalleryDecorator />
     <BottomNavigation />
     <DemoKycHelper />
   </React.StrictMode>

@@ -1,4 +1,5 @@
 import React, { useEffect } from "react";
+import { openPhotoGallery } from "./photoGallery.js";
 
 async function api(path) {
   const response = await fetch(path, { credentials: "same-origin" });
@@ -47,7 +48,9 @@ export default function ShopPhotoListingDecorator() {
         const media = document.createElement("div");
         Object.assign(media.style, MEDIA_FRAME_STYLE);
 
-        const url = photos.get(name);
+        const entry = photos.get(name);
+        const urls = entry?.urls || [];
+        const url = entry?.primary || null;
         let visual;
         if (url) {
           visual = document.createElement("img");
@@ -57,6 +60,38 @@ export default function ShopPhotoListingDecorator() {
             objectFit: "cover",
             display: "block",
           });
+
+          media.setAttribute("role", "button");
+          media.setAttribute("tabindex", "0");
+          media.setAttribute("aria-label", `${name}の写真を見る`);
+          media.style.cursor = "zoom-in";
+          const open = () => openPhotoGallery({ urls: urls.length ? urls : [url], title: name });
+          media.addEventListener("click", open);
+          media.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              open();
+            }
+          });
+
+          if (urls.length > 1) {
+            const badge = document.createElement("div");
+            badge.textContent = `写真 ${urls.length}枚`;
+            Object.assign(badge.style, {
+              position: "absolute",
+              top: "12px",
+              right: "12px",
+              zIndex: "3",
+              padding: "6px 9px",
+              borderRadius: "999px",
+              background: "rgba(10,8,13,.72)",
+              color: "#FFFFFF",
+              fontSize: "11px",
+              fontWeight: "800",
+              pointerEvents: "none",
+            });
+            media.appendChild(badge);
+          }
         } else {
           visual = document.createElement("div");
           visual.setAttribute("aria-label", `${name} 店舗写真未登録`);
@@ -80,6 +115,7 @@ export default function ShopPhotoListingDecorator() {
           padding: "18px",
           background: "linear-gradient(180deg, rgba(10,8,13,.08) 0%, rgba(10,8,13,.38) 48%, rgba(10,8,13,.92) 100%)",
           boxSizing: "border-box",
+          pointerEvents: "none",
         });
 
         const textWrap = document.createElement("div");
@@ -125,7 +161,13 @@ export default function ShopPhotoListingDecorator() {
       photos = new Map(
         (data.jobs || [])
           .filter((job) => job.shop_photo_url)
-          .map((job) => [String(job.shop_name || "").trim(), job.shop_photo_url])
+          .map((job) => {
+            const primary = job.shop_photo_url;
+            const urls = Array.isArray(job.shop_photo_urls) && job.shop_photo_urls.length
+              ? job.shop_photo_urls.filter(Boolean)
+              : [primary];
+            return [String(job.shop_name || "").trim(), { primary, urls }];
+          })
       );
       ready = true;
       decorate();
