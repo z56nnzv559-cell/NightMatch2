@@ -66,6 +66,78 @@ function sameMessage(a, b) {
   return a && b && a.from === b.from && a.body === b.body && Number(a.at || 0) === Number(b.at || 0);
 }
 
+function useIOSChatViewport() {
+  const [viewport, setViewport] = useState(() => ({
+    height: typeof window === "undefined" ? 800 : Math.round(window.visualViewport?.height || window.innerHeight),
+    top: 0,
+    keyboard: false,
+  }));
+
+  useEffect(() => {
+    const vv = window.visualViewport;
+    const update = () => {
+      const height = Math.max(1, Math.round(vv?.height || window.innerHeight));
+      const layoutHeight = Math.max(window.innerHeight, document.documentElement.clientHeight || 0);
+      setViewport({
+        height,
+        top: Math.max(0, Math.round(vv?.offsetTop || 0)),
+        keyboard: height < layoutHeight - 120,
+      });
+    };
+    update();
+    vv?.addEventListener("resize", update);
+    vv?.addEventListener("scroll", update);
+    window.addEventListener("resize", update);
+    window.addEventListener("orientationchange", update);
+    return () => {
+      vv?.removeEventListener("resize", update);
+      vv?.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+      window.removeEventListener("orientationchange", update);
+    };
+  }, []);
+
+  return viewport;
+}
+
+function useLockBackgroundPage() {
+  useEffect(() => {
+    const body = document.body;
+    const html = document.documentElement;
+    const scrollY = window.scrollY;
+    const bodyStyle = {
+      position: body.style.position,
+      top: body.style.top,
+      left: body.style.left,
+      right: body.style.right,
+      width: body.style.width,
+      overflow: body.style.overflow,
+      overscrollBehavior: body.style.overscrollBehavior,
+      touchAction: body.style.touchAction,
+    };
+    const htmlStyle = {
+      overflow: html.style.overflow,
+      overscrollBehavior: html.style.overscrollBehavior,
+    };
+
+    body.style.position = "fixed";
+    body.style.top = `-${scrollY}px`;
+    body.style.left = "0";
+    body.style.right = "0";
+    body.style.width = "100%";
+    body.style.overflow = "hidden";
+    body.style.overscrollBehavior = "none";
+    html.style.overflow = "hidden";
+    html.style.overscrollBehavior = "none";
+
+    return () => {
+      Object.assign(body.style, bodyStyle);
+      Object.assign(html.style, htmlStyle);
+      requestAnimationFrame(() => window.scrollTo(0, scrollY));
+    };
+  }, []);
+}
+
 function TalkList({ deals, summaries, loading, error, onOpen, onClose }) {
   return <section className="nm-line-sheet" aria-label="トーク一覧">
     <header className="nm-line-list-header">
@@ -73,7 +145,7 @@ function TalkList({ deals, summaries, loading, error, onOpen, onClose }) {
         <div className="nm-line-kicker">NightMatch</div>
         <h2>トーク</h2>
       </div>
-      <button type="button" className="nm-line-close" onClick={onClose} aria-label="チャットを閉じる">閉じる</button>
+      <button type="button" className="nm-line-close" onClick={onClose}>閉じる</button>
     </header>
 
     {loading && <div className="nm-line-notice">トークを読み込んでいます…</div>}
@@ -144,14 +216,7 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       socket = new WebSocket(`${protocol}//${window.location.host}/api/deals/${encodeURIComponent(deal.id)}/socket`);
       socketRef.current = socket;
-
-      socket.addEventListener("open", () => {
-        if (!cancelled) {
-          setConnected(true);
-          setError("");
-        }
-      });
-
+      socket.addEventListener("open", () => { if (!cancelled) { setConnected(true); setError(""); } });
       socket.addEventListener("message", (event) => {
         if (cancelled) return;
         let incoming;
@@ -164,47 +229,39 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
           return next;
         });
       });
-
       socket.addEventListener("close", () => {
         if (cancelled) return;
         setConnected(false);
         socketRef.current = null;
         retryTimer = setTimeout(connect, 1800);
       });
-
-      socket.addEventListener("error", () => {
-        if (!cancelled) setConnected(false);
-      });
+      socket.addEventListener("error", () => { if (!cancelled) setConnected(false); });
     };
 
-    loadHistory().catch((err) => {
-      if (!cancelled) setError(String(err.message || err));
-    }).finally(connect);
-
-    const fallback = setInterval(() => {
-      loadHistory().catch(() => {});
-    }, 8000);
-
+    loadHistory().catch((err) => { if (!cancelled) setError(String(err.message || err)); }).finally(connect);
+    const fallback = setInterval(() => loadHistory().catch(() => {}), 8000);
     return () => {
       cancelled = true;
       clearInterval(fallback);
       if (retryTimer) clearTimeout(retryTimer);
-      if (socket) {
-        try { socket.close(); } catch {}
-      }
+      if (socket) { try { socket.close(); } catch {} }
       socketRef.current = null;
     };
   }, [deal.id, loadHistory, onMessages]);
 
+  const scrollToBottom = useCallback(() => {
+    requestAnimationFrame(() => {
+      const node = scrollerRef.current;
+      if (node) node.scrollTop = node.scrollHeight;
+    });
+  }, []);
+
   useEffect(() => {
-    if (!scrollerRef.current) return;
     if (messages.length !== lastCountRef.current) {
-      requestAnimationFrame(() => {
-        if (scrollerRef.current) scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
-      });
+      scrollToBottom();
       lastCountRef.current = messages.length;
     }
-  }, [messages]);
+  }, [messages, scrollToBottom]);
 
   const send = async (event) => {
     event.preventDefault();
@@ -212,17 +269,10 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
     if (!body || sending) return;
     setSending(true);
     setError("");
-
     try {
       const socket = socketRef.current;
       if (socket?.readyState === WebSocket.OPEN) {
-        const optimistic = {
-          dealId: deal.id,
-          from: `${session.kind}:local`,
-          body,
-          at: Date.now(),
-          optimistic: true,
-        };
+        const optimistic = { dealId: deal.id, from: `${session.kind}:local`, body, at: Date.now(), optimistic: true };
         setMessages((current) => {
           const next = [...current, optimistic];
           onMessages(deal.id, next);
@@ -239,7 +289,7 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
         setText("");
         await loadHistory();
       }
-      if (textareaRef.current) textareaRef.current.focus();
+      scrollToBottom();
     } catch (err) {
       setError(String(err.message || err));
     } finally {
@@ -276,7 +326,7 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
         <strong>{deal.counterpart_name}</strong>
         <span>{connected ? "接続中" : "再接続中"} · {deal.area}{deal.area && deal.business_type ? " · " : ""}{deal.business_type}</span>
       </div>
-      <button type="button" className="nm-line-close" onClick={onClose} aria-label="チャットを閉じる">閉じる</button>
+      <button type="button" className="nm-line-close" onClick={onClose}>閉じる</button>
     </header>
 
     <div className="nm-line-messages" ref={scrollerRef}>
@@ -290,9 +340,11 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
         ref={textareaRef}
         value={text}
         onChange={(event) => setText(event.target.value)}
+        onFocus={() => { setTimeout(scrollToBottom, 120); setTimeout(scrollToBottom, 350); }}
         maxLength={2000}
         rows={1}
         placeholder="メッセージを入力"
+        enterKeyHint="send"
       />
       <button type="submit" disabled={!text.trim() || sending} aria-label="送信">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 4 17 8-17 8 3-8-3-8Z"/><path d="M7 12h14"/></svg>
@@ -302,22 +354,25 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
 }
 
 const css = `
-.nm-line-backdrop{position:fixed;z-index:270;inset:0;background:rgba(0,0,0,.76);display:flex;align-items:flex-end;justify-content:center}
-.nm-line-sheet{width:min(100%,720px);height:min(88dvh,820px);background:${C.bg};color:${C.text};border:1px solid ${C.line};border-radius:22px 22px 0 0;box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden}
+.nm-line-backdrop{position:fixed;z-index:10000;left:0;right:0;top:0;background:${C.bg};display:flex;align-items:flex-end;justify-content:center;overflow:hidden;overscroll-behavior:none;touch-action:manipulation}
+.nm-line-sheet{width:min(100%,720px);height:min(88dvh,820px);background:${C.bg};color:${C.text};border:1px solid ${C.line};border-radius:22px 22px 0 0;box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;min-height:0}
 .nm-line-list-header,.nm-line-room-header{min-height:66px;display:flex;align-items:center;border-bottom:1px solid ${C.line};background:rgba(16,13,20,.98);padding:10px 14px;box-sizing:border-box;flex-shrink:0}
 .nm-line-list-header{justify-content:space-between}.nm-line-kicker{font-size:10px;color:${C.gold};letter-spacing:.05em}.nm-line-list-header h2{margin:1px 0 0;font-size:24px}.nm-line-close{border:0;background:transparent;color:${C.sub};font-size:13px;padding:8px}
 .nm-line-notice{margin:12px;border:1px solid ${C.line};border-radius:13px;padding:12px;color:${C.sub};font-size:13px}.nm-line-notice.danger{border-color:${C.danger};color:${C.danger}}
 .nm-line-empty{margin:auto;max-width:280px;text-align:center;display:grid;gap:8px;color:${C.sub};padding:28px}.nm-line-empty-icon{font-size:34px}.nm-line-empty strong{color:${C.text};font-size:15px}.nm-line-empty span{font-size:12px;line-height:1.65}
-.nm-line-talk-list{overflow:auto;flex:1}.nm-line-talk-row{width:100%;border:0;border-bottom:1px solid ${C.line};background:transparent;color:${C.text};padding:11px 12px;display:grid;grid-template-columns:48px minmax(0,1fr) 18px;gap:11px;align-items:center;text-align:left}.nm-line-talk-row:active{background:${C.surface}}
+.nm-line-talk-list{overflow:auto;flex:1;min-height:0;-webkit-overflow-scrolling:touch}.nm-line-talk-row{width:100%;border:0;border-bottom:1px solid ${C.line};background:transparent;color:${C.text};padding:11px 12px;display:grid;grid-template-columns:48px minmax(0,1fr) 18px;gap:11px;align-items:center;text-align:left}.nm-line-talk-row:active{background:${C.surface}}
 .nm-line-avatar,.nm-line-message-avatar{border-radius:50%;display:grid;place-items:center;background:${C.surface2};color:${C.gold};font-weight:850;border:1px solid ${C.line};flex-shrink:0}.nm-line-avatar{width:48px;height:48px;font-size:18px}.nm-line-message-avatar{width:32px;height:32px;font-size:12px;margin-top:2px}
 .nm-line-talk-main{min-width:0}.nm-line-talk-top{display:flex;justify-content:space-between;align-items:center;gap:10px}.nm-line-talk-top strong{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nm-line-talk-top time{font-size:10px;color:${C.sub};white-space:nowrap}.nm-line-talk-preview{margin-top:5px;font-size:12px;color:${C.sub};overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nm-line-chevron{width:17px;height:17px;fill:none;stroke:${C.sub};stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .nm-line-room-header{display:grid;grid-template-columns:42px minmax(0,1fr) 48px;gap:5px}.nm-line-back{border:0;background:transparent;color:${C.text};width:40px;height:40px;display:grid;place-items:center}.nm-line-back svg{width:27px;height:27px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.nm-line-room-person{text-align:center;min-width:0;display:grid;gap:2px}.nm-line-room-person strong{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nm-line-room-person span{font-size:9px;color:${C.sub};overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nm-line-messages{flex:1;overflow:auto;padding:14px 10px 20px;background:${C.bg};display:flex;flex-direction:column;gap:7px;overscroll-behavior:contain}.nm-line-date{text-align:center;margin:7px 0}.nm-line-date span{display:inline-block;background:${C.surface2};color:${C.sub};font-size:9px;padding:4px 9px;border-radius:999px}.nm-line-message-row{display:flex;align-items:flex-end;gap:7px;max-width:88%}.nm-line-message-row.mine{align-self:flex-end;justify-content:flex-end}.nm-line-message-row.theirs{align-self:flex-start}.nm-line-message-stack{display:grid;gap:2px;min-width:0}.nm-line-message-row.mine .nm-line-message-stack{justify-items:end}.nm-line-message-row.theirs .nm-line-message-stack{justify-items:start}.nm-line-bubble{padding:9px 12px;border-radius:17px;font-size:14px;line-height:1.5;word-break:break-word;white-space:pre-wrap}.nm-line-message-row.mine .nm-line-bubble{background:${C.mint};color:#151018;border-bottom-right-radius:5px}.nm-line-message-row.theirs .nm-line-bubble{background:${C.surface2};color:${C.text};border-bottom-left-radius:5px}.nm-line-message-meta{display:flex;gap:5px;align-items:center;font-size:8px;color:${C.sub};padding:0 3px}.nm-line-message-meta span{opacity:.75}.nm-line-room-empty{margin:auto;text-align:center;color:${C.sub};font-size:12px;line-height:1.7}.nm-line-room-error{padding:7px 12px;color:${C.danger};font-size:10px;text-align:center;background:rgba(229,125,139,.08)}
-.nm-line-compose{display:grid;grid-template-columns:minmax(0,1fr) 42px;gap:8px;align-items:end;border-top:1px solid ${C.line};padding:9px 10px calc(9px + env(safe-area-inset-bottom));background:${C.surface};flex-shrink:0}.nm-line-compose textarea{width:100%;box-sizing:border-box;max-height:100px;resize:none;border:1px solid ${C.line};background:${C.surface2};color:${C.text};border-radius:20px;padding:10px 13px;font:inherit;font-size:14px;line-height:1.4;outline:none}.nm-line-compose button{width:40px;height:40px;border:0;border-radius:50%;display:grid;place-items:center;background:${C.gold};color:#151018}.nm-line-compose button:disabled{opacity:.35}.nm-line-compose button svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.nm-line-messages{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:14px 10px 20px;background:${C.bg};display:flex;flex-direction:column;gap:7px;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}.nm-line-date{text-align:center;margin:7px 0}.nm-line-date span{display:inline-block;background:${C.surface2};color:${C.sub};font-size:9px;padding:4px 9px;border-radius:999px}.nm-line-message-row{display:flex;align-items:flex-end;gap:7px;max-width:88%}.nm-line-message-row.mine{align-self:flex-end;justify-content:flex-end}.nm-line-message-row.theirs{align-self:flex-start}.nm-line-message-stack{display:grid;gap:2px;min-width:0}.nm-line-message-row.mine .nm-line-message-stack{justify-items:end}.nm-line-message-row.theirs .nm-line-message-stack{justify-items:start}.nm-line-bubble{padding:9px 12px;border-radius:17px;font-size:14px;line-height:1.5;word-break:break-word;white-space:pre-wrap}.nm-line-message-row.mine .nm-line-bubble{background:${C.mint};color:#151018;border-bottom-right-radius:5px}.nm-line-message-row.theirs .nm-line-bubble{background:${C.surface2};color:${C.text};border-bottom-left-radius:5px}.nm-line-message-meta{display:flex;gap:5px;align-items:center;font-size:8px;color:${C.sub};padding:0 3px}.nm-line-message-meta span{opacity:.75}.nm-line-room-empty{margin:auto;text-align:center;color:${C.sub};font-size:12px;line-height:1.7}.nm-line-room-error{padding:7px 12px;color:${C.danger};font-size:10px;text-align:center;background:rgba(229,125,139,.08)}
+.nm-line-compose{display:grid;grid-template-columns:minmax(0,1fr) 42px;gap:8px;align-items:end;border-top:1px solid ${C.line};padding:8px 10px max(8px,env(safe-area-inset-bottom));background:${C.surface};flex-shrink:0}.nm-line-compose textarea{width:100%;box-sizing:border-box;max-height:96px;resize:none;border:1px solid ${C.line};background:${C.surface2};color:${C.text};border-radius:20px;padding:10px 13px;font-family:inherit;font-size:16px!important;line-height:1.35;outline:none;-webkit-text-size-adjust:100%}.nm-line-compose button{width:40px;height:40px;border:0;border-radius:50%;display:grid;place-items:center;background:${C.gold};color:#151018}.nm-line-compose button:disabled{opacity:.35}.nm-line-compose button svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+@media(max-width:719px){.nm-line-backdrop{align-items:stretch}.nm-line-sheet{width:100%;height:100%;max-height:none;border:0;border-radius:0}.nm-line-compose{padding-bottom:8px}}
 @media(min-width:720px){.nm-line-backdrop{align-items:center;padding:20px}.nm-line-sheet{height:min(80dvh,760px);border-radius:22px}}
 `;
 
 export default function LineLikeChat({ session, onClose }) {
+  useLockBackgroundPage();
+  const viewport = useIOSChatViewport();
   const [deals, setDeals] = useState([]);
   const [selectedId, setSelectedId] = useState("");
   const [summaries, setSummaries] = useState({});
@@ -337,7 +392,6 @@ export default function LineLikeChat({ session, onClose }) {
         setDeals(rows);
         setLoading(false);
         setError("");
-
         const results = await Promise.allSettled(rows.map(async (deal) => {
           const history = await api(`/api/deals/${encodeURIComponent(deal.id)}/messages`);
           return { id: deal.id, messages: history.messages || [] };
@@ -355,10 +409,7 @@ export default function LineLikeChat({ session, onClose }) {
         setMessageCache((current) => ({ ...current, ...nextCache }));
         setSummaries((current) => ({ ...current, ...nextSummaries }));
       } catch (err) {
-        if (!cancelled) {
-          setLoading(false);
-          setError(String(err.message || err));
-        }
+        if (!cancelled) { setLoading(false); setError(String(err.message || err)); }
       }
     };
     load();
@@ -368,30 +419,21 @@ export default function LineLikeChat({ session, onClose }) {
   const updateMessages = useCallback((dealId, messages) => {
     setMessageCache((current) => ({ ...current, [dealId]: messages }));
     const last = messages[messages.length - 1];
-    if (last) {
-      setSummaries((current) => ({ ...current, [dealId]: { body: last.body, at: last.at } }));
-    }
+    if (last) setSummaries((current) => ({ ...current, [dealId]: { body: last.body, at: last.at } }));
   }, []);
 
-  return createPortal(<><style>{css}</style><div className="nm-line-backdrop" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    {selected ? (
-      <TalkRoom
-        session={session}
-        deal={selected}
-        initialMessages={messageCache[selected.id] || []}
-        onMessages={updateMessages}
-        onBack={() => setSelectedId("")}
-        onClose={onClose}
-      />
-    ) : (
-      <TalkList
-        deals={deals}
-        summaries={summaries}
-        loading={loading}
-        error={error}
-        onOpen={setSelectedId}
-        onClose={onClose}
-      />
-    )}
-  </div></>, document.body);
+  const backdropStyle = window.innerWidth < 720
+    ? { height: `${viewport.height}px`, top: `${viewport.top}px` }
+    : { height: "100dvh", top: 0 };
+
+  return createPortal(<>
+    <style>{css}</style>
+    <div className={`nm-line-backdrop${viewport.keyboard ? " keyboard-open" : ""}`} style={backdropStyle}>
+      {selected ? (
+        <TalkRoom session={session} deal={selected} initialMessages={messageCache[selected.id] || []} onMessages={updateMessages} onBack={() => setSelectedId("")} onClose={onClose}/>
+      ) : (
+        <TalkList deals={deals} summaries={summaries} loading={loading} error={error} onOpen={setSelectedId} onClose={onClose}/>
+      )}
+    </div>
+  </>, document.body);
 }
