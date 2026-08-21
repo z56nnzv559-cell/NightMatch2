@@ -176,12 +176,26 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
         if (!cancelled) {
           setConnected(true);
           setError("");
+          try { socket.send(JSON.stringify({ type: "read" })); } catch {}
         }
       });
       socket.addEventListener("message", (event) => {
         if (cancelled) return;
         let incoming;
         try { incoming = JSON.parse(event.data); } catch { return; }
+
+        if (incoming?.type === "read") {
+          if (incoming.by && incoming.by !== session.kind) {
+            const readAt = Number(incoming.at || 0);
+            setMessages((current) => current.map((item) => {
+              const mine = String(item.from || "").startsWith(`${session.kind}:`);
+              if (!mine || item.optimistic || item.read || Number(item.at || 0) > readAt) return item;
+              return { ...item, read: true };
+            }));
+          }
+          return;
+        }
+
         if (!incoming?.body || !incoming?.from) return;
         setMessages((current) => {
           if (current.some((item) => sameMessage(item, incoming))) return current;
@@ -189,6 +203,10 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
           onMessages(deal.id, next);
           return next;
         });
+
+        if (!String(incoming.from).startsWith(`${session.kind}:`) && socket?.readyState === WebSocket.OPEN) {
+          try { socket.send(JSON.stringify({ type: "read" })); } catch {}
+        }
       });
       socket.addEventListener("close", () => {
         if (cancelled) return;
@@ -213,7 +231,7 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
       if (socket) { try { socket.close(); } catch {} }
       socketRef.current = null;
     };
-  }, [deal.id, loadHistory, onMessages]);
+  }, [deal.id, loadHistory, onMessages, session.kind]);
 
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
@@ -244,6 +262,7 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
           body,
           at: Date.now(),
           optimistic: true,
+          read: false,
         };
         setMessages((current) => {
           const next = [...current, optimistic];
@@ -283,7 +302,11 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
         {!mine && <div className="nm-chat-message-avatar">{initialOf(deal.counterpart_name)}</div>}
         <div className="nm-chat-message-stack">
           <div className="nm-chat-bubble">{message.body}</div>
-          <div className="nm-chat-message-meta"><time>{messageTime(message.at)}</time>{message.optimistic && <span>送信中</span>}</div>
+          <div className="nm-chat-message-meta">
+            {mine && !message.optimistic && message.read && <span className="nm-chat-read">既読</span>}
+            <time>{messageTime(message.at)}</time>
+            {message.optimistic && <span>送信中</span>}
+          </div>
         </div>
       </div>
     );
@@ -335,7 +358,7 @@ const css = `
 .nm-chat-avatar,.nm-chat-message-avatar{border-radius:50%;display:grid;place-items:center;background:${C.surface2};color:${C.gold};font-weight:850;border:1px solid ${C.line};flex-shrink:0}.nm-chat-avatar{width:48px;height:48px;font-size:18px}.nm-chat-message-avatar{width:32px;height:32px;font-size:12px;margin-top:2px}
 .nm-chat-talk-main{min-width:0}.nm-chat-talk-top{display:flex;justify-content:space-between;align-items:center;gap:10px}.nm-chat-talk-top strong{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nm-chat-talk-top time{font-size:10px;color:${C.sub};white-space:nowrap}.nm-chat-talk-preview{margin-top:5px;font-size:12px;color:${C.sub};overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nm-chat-chevron{width:17px;height:17px;fill:none;stroke:${C.sub};stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .nm-chat-room-header{display:grid;grid-template-columns:42px minmax(0,1fr) 48px;gap:5px}.nm-chat-back{border:0;background:transparent;color:${C.text};width:40px;height:40px;display:grid;place-items:center}.nm-chat-back svg{width:27px;height:27px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.nm-chat-room-person{text-align:center;min-width:0;display:grid;gap:2px}.nm-chat-room-person strong{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nm-chat-room-person span{font-size:9px;color:${C.sub};overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nm-chat-messages{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:14px 10px 20px;background:${C.bg};display:flex;flex-direction:column;gap:7px;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}.nm-chat-date{text-align:center;margin:7px 0}.nm-chat-date span{display:inline-block;background:${C.surface2};color:${C.sub};font-size:9px;padding:4px 9px;border-radius:999px}.nm-chat-message-row{display:flex;align-items:flex-end;gap:7px;max-width:88%}.nm-chat-message-row.mine{align-self:flex-end;justify-content:flex-end}.nm-chat-message-row.theirs{align-self:flex-start}.nm-chat-message-stack{display:grid;gap:2px;min-width:0}.nm-chat-message-row.mine .nm-chat-message-stack{justify-items:end}.nm-chat-message-row.theirs .nm-chat-message-stack{justify-items:start}.nm-chat-bubble{padding:9px 12px;border-radius:17px;font-size:14px;line-height:1.5;word-break:break-word;white-space:pre-wrap}.nm-chat-message-row.mine .nm-chat-bubble{background:${C.mint};color:#151018;border-bottom-right-radius:5px}.nm-chat-message-row.theirs .nm-chat-bubble{background:${C.surface2};color:${C.text};border-bottom-left-radius:5px}.nm-chat-message-meta{display:flex;gap:5px;align-items:center;font-size:8px;color:${C.sub};padding:0 3px}.nm-chat-message-meta span{opacity:.75}.nm-chat-room-empty{margin:auto;text-align:center;color:${C.sub};font-size:12px;line-height:1.7}.nm-chat-room-error{padding:7px 12px;color:${C.danger};font-size:10px;text-align:center;background:rgba(229,125,139,.08)}
+.nm-chat-messages{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:14px 10px 20px;background:${C.bg};display:flex;flex-direction:column;gap:7px;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}.nm-chat-date{text-align:center;margin:7px 0}.nm-chat-date span{display:inline-block;background:${C.surface2};color:${C.sub};font-size:9px;padding:4px 9px;border-radius:999px}.nm-chat-message-row{display:flex;align-items:flex-end;gap:7px;max-width:88%}.nm-chat-message-row.mine{align-self:flex-end;justify-content:flex-end}.nm-chat-message-row.theirs{align-self:flex-start}.nm-chat-message-stack{display:grid;gap:3px;min-width:0}.nm-chat-message-row.mine .nm-chat-message-stack{justify-items:end}.nm-chat-message-row.theirs .nm-chat-message-stack{justify-items:start}.nm-chat-bubble{padding:9px 12px;border-radius:17px;font-size:14px;line-height:1.5;word-break:break-word;white-space:pre-wrap}.nm-chat-message-row.mine .nm-chat-bubble{background:${C.mint};color:#151018;border-bottom-right-radius:5px}.nm-chat-message-row.theirs .nm-chat-bubble{background:${C.surface2};color:${C.text};border-bottom-left-radius:5px}.nm-chat-message-meta{display:flex;gap:6px;align-items:center;font-size:10px;color:${C.sub};padding:0 3px;line-height:1.2}.nm-chat-message-meta time{font-variant-numeric:tabular-nums}.nm-chat-message-meta span{opacity:.78}.nm-chat-message-meta .nm-chat-read{color:${C.mint};font-weight:800;opacity:1}.nm-chat-room-empty{margin:auto;text-align:center;color:${C.sub};font-size:12px;line-height:1.7}.nm-chat-room-error{padding:7px 12px;color:${C.danger};font-size:10px;text-align:center;background:rgba(229,125,139,.08)}
 .nm-chat-compose{display:grid;grid-template-columns:minmax(0,1fr) 42px;gap:8px;align-items:end;border-top:1px solid ${C.line};padding:8px 10px max(8px,env(safe-area-inset-bottom));background:${C.surface};flex-shrink:0}.nm-chat-compose textarea{display:block;width:100%;box-sizing:border-box;max-height:96px;resize:none;border:1px solid ${C.line};background:${C.surface2};color:${C.text};border-radius:20px;padding:10px 13px;font-family:inherit;font-size:16px!important;line-height:1.35;outline:none;-webkit-text-size-adjust:100%;appearance:none}.nm-chat-compose button{width:40px;height:40px;border:0;border-radius:50%;display:grid;place-items:center;background:${C.gold};color:#151018}.nm-chat-compose button:disabled{opacity:.35}.nm-chat-compose button svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 @supports(height:100svh){.nm-chat-shell{height:100svh}}
 @supports(height:100dvh){.nm-chat-shell{height:100dvh}}
