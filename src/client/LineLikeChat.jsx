@@ -66,112 +66,69 @@ function sameMessage(a, b) {
   return a && b && a.from === b.from && a.body === b.body && Number(a.at || 0) === Number(b.at || 0);
 }
 
-function useIOSChatViewport() {
-  const [viewport, setViewport] = useState(() => ({
-    height: typeof window === "undefined" ? 800 : Math.round(window.visualViewport?.height || window.innerHeight),
-    top: 0,
-    keyboard: false,
-  }));
-
+function useChatPageMode() {
   useEffect(() => {
-    const vv = window.visualViewport;
-    const update = () => {
-      const height = Math.max(1, Math.round(vv?.height || window.innerHeight));
-      const layoutHeight = Math.max(window.innerHeight, document.documentElement.clientHeight || 0);
-      setViewport({
-        height,
-        top: Math.max(0, Math.round(vv?.offsetTop || 0)),
-        keyboard: height < layoutHeight - 120,
-      });
-    };
-    update();
-    vv?.addEventListener("resize", update);
-    vv?.addEventListener("scroll", update);
-    window.addEventListener("resize", update);
-    window.addEventListener("orientationchange", update);
-    return () => {
-      vv?.removeEventListener("resize", update);
-      vv?.removeEventListener("scroll", update);
-      window.removeEventListener("resize", update);
-      window.removeEventListener("orientationchange", update);
-    };
-  }, []);
-
-  return viewport;
-}
-
-function useLockBackgroundPage() {
-  useEffect(() => {
-    const body = document.body;
     const html = document.documentElement;
-    const scrollY = window.scrollY;
-    const bodyStyle = {
-      position: body.style.position,
-      top: body.style.top,
-      left: body.style.left,
-      right: body.style.right,
-      width: body.style.width,
-      overflow: body.style.overflow,
-      overscrollBehavior: body.style.overscrollBehavior,
-      touchAction: body.style.touchAction,
-    };
-    const htmlStyle = {
-      overflow: html.style.overflow,
-      overscrollBehavior: html.style.overscrollBehavior,
+    const body = document.body;
+    const root = document.getElementById("root");
+    const previous = {
+      htmlOverflow: html.style.overflow,
+      bodyOverflow: body.style.overflow,
+      bodyOverscroll: body.style.overscrollBehavior,
+      bodyBackground: body.style.background,
+      rootVisibility: root?.style.visibility || "",
     };
 
-    body.style.position = "fixed";
-    body.style.top = `-${scrollY}px`;
-    body.style.left = "0";
-    body.style.right = "0";
-    body.style.width = "100%";
+    html.style.overflow = "hidden";
     body.style.overflow = "hidden";
     body.style.overscrollBehavior = "none";
-    html.style.overflow = "hidden";
-    html.style.overscrollBehavior = "none";
+    body.style.background = C.bg;
+    if (root) root.style.visibility = "hidden";
 
     return () => {
-      Object.assign(body.style, bodyStyle);
-      Object.assign(html.style, htmlStyle);
-      requestAnimationFrame(() => window.scrollTo(0, scrollY));
+      html.style.overflow = previous.htmlOverflow;
+      body.style.overflow = previous.bodyOverflow;
+      body.style.overscrollBehavior = previous.bodyOverscroll;
+      body.style.background = previous.bodyBackground;
+      if (root) root.style.visibility = previous.rootVisibility;
     };
   }, []);
 }
 
 function TalkList({ deals, summaries, loading, error, onOpen, onClose }) {
-  return <section className="nm-line-sheet" aria-label="トーク一覧">
-    <header className="nm-line-list-header">
+  return <section className="nm-chat-page" aria-label="トーク一覧">
+    <header className="nm-chat-list-header">
       <div>
-        <div className="nm-line-kicker">NightMatch</div>
+        <div className="nm-chat-kicker">NightMatch</div>
         <h2>トーク</h2>
       </div>
-      <button type="button" className="nm-line-close" onClick={onClose}>閉じる</button>
+      <button type="button" className="nm-chat-close" onClick={onClose}>閉じる</button>
     </header>
 
-    {loading && <div className="nm-line-notice">トークを読み込んでいます…</div>}
-    {error && <div className="nm-line-notice danger">{error}</div>}
+    {loading && <div className="nm-chat-notice">トークを読み込んでいます…</div>}
+    {error && <div className="nm-chat-notice danger">{error}</div>}
     {!loading && deals.length === 0 && (
-      <div className="nm-line-empty">
-        <div className="nm-line-empty-icon">💬</div>
+      <div className="nm-chat-empty">
+        <div className="nm-chat-empty-icon">💬</div>
         <strong>トークはまだありません</strong>
         <span>応募またはスカウトが始まると、ここに相手とのトークが表示されます。</span>
       </div>
     )}
 
-    <div className="nm-line-talk-list">
+    <div className="nm-chat-talk-list">
       {deals.map((deal) => {
         const summary = summaries[deal.id] || {};
         const fallback = `${deal.area || ""}${deal.area && deal.business_type ? " · " : ""}${deal.business_type || ""}` || "トークを開く";
-        return <button type="button" className="nm-line-talk-row" key={deal.id} onClick={() => onOpen(deal.id)}>
-          <div className="nm-line-avatar">{initialOf(deal.counterpart_name)}</div>
-          <div className="nm-line-talk-main">
-            <div className="nm-line-talk-top">
+        return <button type="button" className="nm-chat-talk-row" key={deal.id} onClick={() => onOpen(deal.id)}>
+          <div className="nm-chat-avatar">{initialOf(deal.counterpart_name)}</div>
+          <div className="nm-chat-talk-main">
+            <div className="nm-chat-talk-top">
               <strong>{deal.counterpart_name}</strong>
               <time>{listTime(summary.at || deal.updated_at || deal.created_at)}</time>
             </div>
-            <div className="nm-line-talk-preview">{summary.body || fallback}</div>
+            <div className="nm-chat-talk-preview">{summary.body || fallback}</div>
           </div>
-          <svg className="nm-line-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          <svg className="nm-chat-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
         </button>;
       })}
     </div>
@@ -185,7 +142,6 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
   const [sending, setSending] = useState(false);
   const [connected, setConnected] = useState(false);
   const scrollerRef = useRef(null);
-  const textareaRef = useRef(null);
   const socketRef = useRef(null);
   const lastCountRef = useRef(0);
 
@@ -216,7 +172,12 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       socket = new WebSocket(`${protocol}//${window.location.host}/api/deals/${encodeURIComponent(deal.id)}/socket`);
       socketRef.current = socket;
-      socket.addEventListener("open", () => { if (!cancelled) { setConnected(true); setError(""); } });
+      socket.addEventListener("open", () => {
+        if (!cancelled) {
+          setConnected(true);
+          setError("");
+        }
+      });
       socket.addEventListener("message", (event) => {
         if (cancelled) return;
         let incoming;
@@ -235,10 +196,15 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
         socketRef.current = null;
         retryTimer = setTimeout(connect, 1800);
       });
-      socket.addEventListener("error", () => { if (!cancelled) setConnected(false); });
+      socket.addEventListener("error", () => {
+        if (!cancelled) setConnected(false);
+      });
     };
 
-    loadHistory().catch((err) => { if (!cancelled) setError(String(err.message || err)); }).finally(connect);
+    loadHistory().catch((err) => {
+      if (!cancelled) setError(String(err.message || err));
+    }).finally(connect);
+
     const fallback = setInterval(() => loadHistory().catch(() => {}), 8000);
     return () => {
       cancelled = true;
@@ -272,7 +238,13 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
     try {
       const socket = socketRef.current;
       if (socket?.readyState === WebSocket.OPEN) {
-        const optimistic = { dealId: deal.id, from: `${session.kind}:local`, body, at: Date.now(), optimistic: true };
+        const optimistic = {
+          dealId: deal.id,
+          from: `${session.kind}:local`,
+          body,
+          at: Date.now(),
+          optimistic: true,
+        };
         setMessages((current) => {
           const next = [...current, optimistic];
           onMessages(deal.id, next);
@@ -302,45 +274,44 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
   messages.forEach((message, index) => {
     const key = dateKey(message.at);
     if (key && key !== previousDate) {
-      rendered.push(<div className="nm-line-date" key={`date-${key}-${index}`}><span>{dateLabel(message.at)}</span></div>);
+      rendered.push(<div className="nm-chat-date" key={`date-${key}-${index}`}><span>{dateLabel(message.at)}</span></div>);
       previousDate = key;
     }
     const mine = String(message.from || "").startsWith(`${session.kind}:`);
     rendered.push(
-      <div className={`nm-line-message-row ${mine ? "mine" : "theirs"}`} key={`${message.at || index}-${index}-${message.optimistic ? "local" : "remote"}`}>
-        {!mine && <div className="nm-line-message-avatar">{initialOf(deal.counterpart_name)}</div>}
-        <div className="nm-line-message-stack">
-          <div className="nm-line-bubble">{message.body}</div>
-          <div className="nm-line-message-meta"><time>{messageTime(message.at)}</time>{message.optimistic && <span>送信中</span>}</div>
+      <div className={`nm-chat-message-row ${mine ? "mine" : "theirs"}`} key={`${message.at || index}-${index}-${message.optimistic ? "local" : "remote"}`}>
+        {!mine && <div className="nm-chat-message-avatar">{initialOf(deal.counterpart_name)}</div>}
+        <div className="nm-chat-message-stack">
+          <div className="nm-chat-bubble">{message.body}</div>
+          <div className="nm-chat-message-meta"><time>{messageTime(message.at)}</time>{message.optimistic && <span>送信中</span>}</div>
         </div>
       </div>
     );
   });
 
-  return <section className="nm-line-sheet nm-line-room" aria-label={`${deal.counterpart_name}とのトーク`}>
-    <header className="nm-line-room-header">
-      <button type="button" className="nm-line-back" onClick={onBack} aria-label="トーク一覧へ戻る">
+  return <section className="nm-chat-page nm-chat-room" aria-label={`${deal.counterpart_name}とのトーク`}>
+    <header className="nm-chat-room-header">
+      <button type="button" className="nm-chat-back" onClick={onBack} aria-label="トーク一覧へ戻る">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7"/></svg>
       </button>
-      <div className="nm-line-room-person">
+      <div className="nm-chat-room-person">
         <strong>{deal.counterpart_name}</strong>
         <span>{connected ? "接続中" : "再接続中"} · {deal.area}{deal.area && deal.business_type ? " · " : ""}{deal.business_type}</span>
       </div>
-      <button type="button" className="nm-line-close" onClick={onClose}>閉じる</button>
+      <button type="button" className="nm-chat-close" onClick={onClose}>閉じる</button>
     </header>
 
-    <div className="nm-line-messages" ref={scrollerRef}>
-      {messages.length === 0 ? <div className="nm-line-room-empty">まだメッセージはありません。<br/>下の入力欄から最初のメッセージを送れます。</div> : rendered}
+    <div className="nm-chat-messages" ref={scrollerRef}>
+      {messages.length === 0 ? <div className="nm-chat-room-empty">まだメッセージはありません。<br/>下の入力欄から最初のメッセージを送れます。</div> : rendered}
     </div>
 
-    {error && <div className="nm-line-room-error">{error}</div>}
+    {error && <div className="nm-chat-room-error">{error}</div>}
 
-    <form className="nm-line-compose" onSubmit={send}>
+    <form className="nm-chat-compose" onSubmit={send}>
       <textarea
-        ref={textareaRef}
         value={text}
         onChange={(event) => setText(event.target.value)}
-        onFocus={() => { setTimeout(scrollToBottom, 120); setTimeout(scrollToBottom, 350); }}
+        onFocus={() => setTimeout(scrollToBottom, 250)}
         maxLength={2000}
         rows={1}
         placeholder="メッセージを入力"
@@ -354,25 +325,24 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
 }
 
 const css = `
-.nm-line-backdrop{position:fixed;z-index:10000;left:0;right:0;top:0;background:${C.bg};display:flex;align-items:flex-end;justify-content:center;overflow:hidden;overscroll-behavior:none;touch-action:manipulation}
-.nm-line-sheet{width:min(100%,720px);height:min(88dvh,820px);background:${C.bg};color:${C.text};border:1px solid ${C.line};border-radius:22px 22px 0 0;box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;min-height:0}
-.nm-line-list-header,.nm-line-room-header{min-height:66px;display:flex;align-items:center;border-bottom:1px solid ${C.line};background:rgba(16,13,20,.98);padding:10px 14px;box-sizing:border-box;flex-shrink:0}
-.nm-line-list-header{justify-content:space-between}.nm-line-kicker{font-size:10px;color:${C.gold};letter-spacing:.05em}.nm-line-list-header h2{margin:1px 0 0;font-size:24px}.nm-line-close{border:0;background:transparent;color:${C.sub};font-size:13px;padding:8px}
-.nm-line-notice{margin:12px;border:1px solid ${C.line};border-radius:13px;padding:12px;color:${C.sub};font-size:13px}.nm-line-notice.danger{border-color:${C.danger};color:${C.danger}}
-.nm-line-empty{margin:auto;max-width:280px;text-align:center;display:grid;gap:8px;color:${C.sub};padding:28px}.nm-line-empty-icon{font-size:34px}.nm-line-empty strong{color:${C.text};font-size:15px}.nm-line-empty span{font-size:12px;line-height:1.65}
-.nm-line-talk-list{overflow:auto;flex:1;min-height:0;-webkit-overflow-scrolling:touch}.nm-line-talk-row{width:100%;border:0;border-bottom:1px solid ${C.line};background:transparent;color:${C.text};padding:11px 12px;display:grid;grid-template-columns:48px minmax(0,1fr) 18px;gap:11px;align-items:center;text-align:left}.nm-line-talk-row:active{background:${C.surface}}
-.nm-line-avatar,.nm-line-message-avatar{border-radius:50%;display:grid;place-items:center;background:${C.surface2};color:${C.gold};font-weight:850;border:1px solid ${C.line};flex-shrink:0}.nm-line-avatar{width:48px;height:48px;font-size:18px}.nm-line-message-avatar{width:32px;height:32px;font-size:12px;margin-top:2px}
-.nm-line-talk-main{min-width:0}.nm-line-talk-top{display:flex;justify-content:space-between;align-items:center;gap:10px}.nm-line-talk-top strong{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nm-line-talk-top time{font-size:10px;color:${C.sub};white-space:nowrap}.nm-line-talk-preview{margin-top:5px;font-size:12px;color:${C.sub};overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nm-line-chevron{width:17px;height:17px;fill:none;stroke:${C.sub};stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-.nm-line-room-header{display:grid;grid-template-columns:42px minmax(0,1fr) 48px;gap:5px}.nm-line-back{border:0;background:transparent;color:${C.text};width:40px;height:40px;display:grid;place-items:center}.nm-line-back svg{width:27px;height:27px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.nm-line-room-person{text-align:center;min-width:0;display:grid;gap:2px}.nm-line-room-person strong{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nm-line-room-person span{font-size:9px;color:${C.sub};overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nm-line-messages{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:14px 10px 20px;background:${C.bg};display:flex;flex-direction:column;gap:7px;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}.nm-line-date{text-align:center;margin:7px 0}.nm-line-date span{display:inline-block;background:${C.surface2};color:${C.sub};font-size:9px;padding:4px 9px;border-radius:999px}.nm-line-message-row{display:flex;align-items:flex-end;gap:7px;max-width:88%}.nm-line-message-row.mine{align-self:flex-end;justify-content:flex-end}.nm-line-message-row.theirs{align-self:flex-start}.nm-line-message-stack{display:grid;gap:2px;min-width:0}.nm-line-message-row.mine .nm-line-message-stack{justify-items:end}.nm-line-message-row.theirs .nm-line-message-stack{justify-items:start}.nm-line-bubble{padding:9px 12px;border-radius:17px;font-size:14px;line-height:1.5;word-break:break-word;white-space:pre-wrap}.nm-line-message-row.mine .nm-line-bubble{background:${C.mint};color:#151018;border-bottom-right-radius:5px}.nm-line-message-row.theirs .nm-line-bubble{background:${C.surface2};color:${C.text};border-bottom-left-radius:5px}.nm-line-message-meta{display:flex;gap:5px;align-items:center;font-size:8px;color:${C.sub};padding:0 3px}.nm-line-message-meta span{opacity:.75}.nm-line-room-empty{margin:auto;text-align:center;color:${C.sub};font-size:12px;line-height:1.7}.nm-line-room-error{padding:7px 12px;color:${C.danger};font-size:10px;text-align:center;background:rgba(229,125,139,.08)}
-.nm-line-compose{display:grid;grid-template-columns:minmax(0,1fr) 42px;gap:8px;align-items:end;border-top:1px solid ${C.line};padding:8px 10px max(8px,env(safe-area-inset-bottom));background:${C.surface};flex-shrink:0}.nm-line-compose textarea{width:100%;box-sizing:border-box;max-height:96px;resize:none;border:1px solid ${C.line};background:${C.surface2};color:${C.text};border-radius:20px;padding:10px 13px;font-family:inherit;font-size:16px!important;line-height:1.35;outline:none;-webkit-text-size-adjust:100%}.nm-line-compose button{width:40px;height:40px;border:0;border-radius:50%;display:grid;place-items:center;background:${C.gold};color:#151018}.nm-line-compose button:disabled{opacity:.35}.nm-line-compose button svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-@media(max-width:719px){.nm-line-backdrop{align-items:stretch}.nm-line-sheet{width:100%;height:100%;max-height:none;border:0;border-radius:0}.nm-line-compose{padding-bottom:8px}}
-@media(min-width:720px){.nm-line-backdrop{align-items:center;padding:20px}.nm-line-sheet{height:min(80dvh,760px);border-radius:22px}}
+.nm-chat-shell{position:fixed;z-index:2147483000;inset:0;width:100%;height:100dvh;background:${C.bg};overflow:hidden;visibility:visible!important;contain:layout paint}
+.nm-chat-page{position:absolute;inset:0;width:100%;height:100%;box-sizing:border-box;background:${C.bg};color:${C.text};display:flex;flex-direction:column;overflow:hidden;min-height:0}
+.nm-chat-list-header,.nm-chat-room-header{min-height:66px;display:flex;align-items:center;border-bottom:1px solid ${C.line};background:${C.bg};padding:10px 14px;box-sizing:border-box;flex-shrink:0;padding-top:max(10px,env(safe-area-inset-top))}
+.nm-chat-list-header{justify-content:space-between}.nm-chat-kicker{font-size:10px;color:${C.gold};letter-spacing:.05em}.nm-chat-list-header h2{margin:1px 0 0;font-size:24px}.nm-chat-close{border:0;background:transparent;color:${C.sub};font-size:13px;padding:8px}
+.nm-chat-notice{margin:12px;border:1px solid ${C.line};border-radius:13px;padding:12px;color:${C.sub};font-size:13px}.nm-chat-notice.danger{border-color:${C.danger};color:${C.danger}}
+.nm-chat-empty{margin:auto;max-width:280px;text-align:center;display:grid;gap:8px;color:${C.sub};padding:28px}.nm-chat-empty-icon{font-size:34px}.nm-chat-empty strong{color:${C.text};font-size:15px}.nm-chat-empty span{font-size:12px;line-height:1.65}
+.nm-chat-talk-list{overflow-y:auto;overflow-x:hidden;flex:1;min-height:0;-webkit-overflow-scrolling:touch}.nm-chat-talk-row{width:100%;border:0;border-bottom:1px solid ${C.line};background:transparent;color:${C.text};padding:11px 12px;display:grid;grid-template-columns:48px minmax(0,1fr) 18px;gap:11px;align-items:center;text-align:left}.nm-chat-talk-row:active{background:${C.surface}}
+.nm-chat-avatar,.nm-chat-message-avatar{border-radius:50%;display:grid;place-items:center;background:${C.surface2};color:${C.gold};font-weight:850;border:1px solid ${C.line};flex-shrink:0}.nm-chat-avatar{width:48px;height:48px;font-size:18px}.nm-chat-message-avatar{width:32px;height:32px;font-size:12px;margin-top:2px}
+.nm-chat-talk-main{min-width:0}.nm-chat-talk-top{display:flex;justify-content:space-between;align-items:center;gap:10px}.nm-chat-talk-top strong{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nm-chat-talk-top time{font-size:10px;color:${C.sub};white-space:nowrap}.nm-chat-talk-preview{margin-top:5px;font-size:12px;color:${C.sub};overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nm-chat-chevron{width:17px;height:17px;fill:none;stroke:${C.sub};stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.nm-chat-room-header{display:grid;grid-template-columns:42px minmax(0,1fr) 48px;gap:5px}.nm-chat-back{border:0;background:transparent;color:${C.text};width:40px;height:40px;display:grid;place-items:center}.nm-chat-back svg{width:27px;height:27px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.nm-chat-room-person{text-align:center;min-width:0;display:grid;gap:2px}.nm-chat-room-person strong{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nm-chat-room-person span{font-size:9px;color:${C.sub};overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nm-chat-messages{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:14px 10px 20px;background:${C.bg};display:flex;flex-direction:column;gap:7px;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}.nm-chat-date{text-align:center;margin:7px 0}.nm-chat-date span{display:inline-block;background:${C.surface2};color:${C.sub};font-size:9px;padding:4px 9px;border-radius:999px}.nm-chat-message-row{display:flex;align-items:flex-end;gap:7px;max-width:88%}.nm-chat-message-row.mine{align-self:flex-end;justify-content:flex-end}.nm-chat-message-row.theirs{align-self:flex-start}.nm-chat-message-stack{display:grid;gap:2px;min-width:0}.nm-chat-message-row.mine .nm-chat-message-stack{justify-items:end}.nm-chat-message-row.theirs .nm-chat-message-stack{justify-items:start}.nm-chat-bubble{padding:9px 12px;border-radius:17px;font-size:14px;line-height:1.5;word-break:break-word;white-space:pre-wrap}.nm-chat-message-row.mine .nm-chat-bubble{background:${C.mint};color:#151018;border-bottom-right-radius:5px}.nm-chat-message-row.theirs .nm-chat-bubble{background:${C.surface2};color:${C.text};border-bottom-left-radius:5px}.nm-chat-message-meta{display:flex;gap:5px;align-items:center;font-size:8px;color:${C.sub};padding:0 3px}.nm-chat-message-meta span{opacity:.75}.nm-chat-room-empty{margin:auto;text-align:center;color:${C.sub};font-size:12px;line-height:1.7}.nm-chat-room-error{padding:7px 12px;color:${C.danger};font-size:10px;text-align:center;background:rgba(229,125,139,.08)}
+.nm-chat-compose{display:grid;grid-template-columns:minmax(0,1fr) 42px;gap:8px;align-items:end;border-top:1px solid ${C.line};padding:8px 10px max(8px,env(safe-area-inset-bottom));background:${C.surface};flex-shrink:0}.nm-chat-compose textarea{display:block;width:100%;box-sizing:border-box;max-height:96px;resize:none;border:1px solid ${C.line};background:${C.surface2};color:${C.text};border-radius:20px;padding:10px 13px;font-family:inherit;font-size:16px!important;line-height:1.35;outline:none;-webkit-text-size-adjust:100%;appearance:none}.nm-chat-compose button{width:40px;height:40px;border:0;border-radius:50%;display:grid;place-items:center;background:${C.gold};color:#151018}.nm-chat-compose button:disabled{opacity:.35}.nm-chat-compose button svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+@supports(height:100svh){.nm-chat-shell{height:100svh}}
+@supports(height:100dvh){.nm-chat-shell{height:100dvh}}
 `;
 
 export default function LineLikeChat({ session, onClose }) {
-  useLockBackgroundPage();
-  const viewport = useIOSChatViewport();
+  useChatPageMode();
   const [deals, setDeals] = useState([]);
   const [selectedId, setSelectedId] = useState("");
   const [summaries, setSummaries] = useState({});
@@ -409,7 +379,10 @@ export default function LineLikeChat({ session, onClose }) {
         setMessageCache((current) => ({ ...current, ...nextCache }));
         setSummaries((current) => ({ ...current, ...nextSummaries }));
       } catch (err) {
-        if (!cancelled) { setLoading(false); setError(String(err.message || err)); }
+        if (!cancelled) {
+          setLoading(false);
+          setError(String(err.message || err));
+        }
       }
     };
     load();
@@ -419,20 +392,32 @@ export default function LineLikeChat({ session, onClose }) {
   const updateMessages = useCallback((dealId, messages) => {
     setMessageCache((current) => ({ ...current, [dealId]: messages }));
     const last = messages[messages.length - 1];
-    if (last) setSummaries((current) => ({ ...current, [dealId]: { body: last.body, at: last.at } }));
+    if (last) {
+      setSummaries((current) => ({ ...current, [dealId]: { body: last.body, at: last.at } }));
+    }
   }, []);
-
-  const backdropStyle = window.innerWidth < 720
-    ? { height: `${viewport.height}px`, top: `${viewport.top}px` }
-    : { height: "100dvh", top: 0 };
 
   return createPortal(<>
     <style>{css}</style>
-    <div className={`nm-line-backdrop${viewport.keyboard ? " keyboard-open" : ""}`} style={backdropStyle}>
+    <div className="nm-chat-shell">
       {selected ? (
-        <TalkRoom session={session} deal={selected} initialMessages={messageCache[selected.id] || []} onMessages={updateMessages} onBack={() => setSelectedId("")} onClose={onClose}/>
+        <TalkRoom
+          session={session}
+          deal={selected}
+          initialMessages={messageCache[selected.id] || []}
+          onMessages={updateMessages}
+          onBack={() => setSelectedId("")}
+          onClose={onClose}
+        />
       ) : (
-        <TalkList deals={deals} summaries={summaries} loading={loading} error={error} onOpen={setSelectedId} onClose={onClose}/>
+        <TalkList
+          deals={deals}
+          summaries={summaries}
+          loading={loading}
+          error={error}
+          onOpen={setSelectedId}
+          onClose={onClose}
+        />
       )}
     </div>
   </>, document.body);
