@@ -2,10 +2,12 @@ import app, { type AppEnv } from "./app-entry";
 import type { NotifyMessage, PayoutMessage } from "./env";
 import { verifyImageSig, verifySession } from "./env";
 import { handleReviewResolveRuntime } from "./admin-review-runtime";
+import { postChatMessage } from "./chat-runtime";
 import { ensureDemoData } from "./demo-seed";
 import { flushFallbackEmails } from "./email-fallback";
 import { consumePayoutBatch } from "./payout-runtime";
 import { servePhoto } from "./photos";
+import { addShopPhotosToJobs, handleShopPhoto, serveShopPhoto } from "./shop-photo";
 import { handleWorkerDirectory } from "./worker-directory";
 
 const REQUIRED_TABLES = [
@@ -128,7 +130,8 @@ async function dedupeJobDirectory(request: Request, env: AppEnv, ctx: ExecutionC
     return true;
   });
 
-  return Response.json({ ...payload, jobs }, { status: response.status });
+  const withPhotos = await addShopPhotosToJobs(env, jobs);
+  return Response.json({ ...payload, jobs: withPhotos }, { status: response.status });
 }
 
 async function dedupeShopJobs(request: Request, env: AppEnv, ctx: ExecutionContext) {
@@ -213,9 +216,23 @@ export default {
         await ensureDemoData(env);
       }
 
+      const shopImage = url.pathname.match(/^\/shop-img\/([^/]+)$/);
+      if (request.method === "GET" && shopImage) {
+        return await serveShopPhoto(env, decodeURIComponent(shopImage[1]));
+      }
+
       const image = url.pathname.match(/^\/img\/([^/]+)$/);
       if (request.method === "GET" && image) {
         return await serveSignedPhoto(request, env, decodeURIComponent(image[1]));
+      }
+
+      if ((request.method === "GET" || request.method === "POST") && url.pathname === "/api/shop/photo") {
+        return await handleShopPhoto(request, env);
+      }
+
+      const chatMessage = url.pathname.match(/^\/api\/deals\/([^/]+)\/messages$/);
+      if (request.method === "POST" && chatMessage) {
+        return await postChatMessage(request, env, decodeURIComponent(chatMessage[1]));
       }
 
       const review = url.pathname.match(/^\/admin\/review\/([^/]+)\/resolve$/);
