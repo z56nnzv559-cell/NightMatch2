@@ -1,11 +1,13 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./AppV2.jsx";
+import BottomNavigation from "./BottomNavigation.jsx";
 import DemoKycHelper from "./DemoKycHelper.jsx";
 import FallbackInbox from "./FallbackInbox.jsx";
-import ProfileEditor from "./ProfileEditor.jsx";
 import JobFormFix from "./JobFormFix.jsx";
 import MarketplaceGalleryV2 from "./MarketplaceGalleryV2.jsx";
+import ProfileEditor from "./ProfileEditor.jsx";
+import ProfileFormEnhancer from "./ProfileFormEnhancer.jsx";
 import "./styles.css";
 
 /* 受信側が無いとWeb Pushが成功しても画面には何も出ない。
@@ -23,8 +25,10 @@ createRoot(document.getElementById("root")!).render(
     <FallbackInbox />
     <App />
     <ProfileEditor />
+    <ProfileFormEnhancer />
     <JobFormFix />
     <MarketplaceGalleryV2 />
+    <BottomNavigation />
     <DemoKycHelper />
   </React.StrictMode>
 );
