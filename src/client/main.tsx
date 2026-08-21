@@ -2,7 +2,6 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./AppV2.jsx";
 import BottomNavigation from "./BottomNavigation.jsx";
-import ChatViewportFix from "./ChatViewportFix.jsx";
 import DemoKycHelper from "./DemoKycHelper.jsx";
 import FallbackInbox from "./FallbackInbox.jsx";
 import JobFormFix from "./JobFormFix.jsx";
@@ -31,7 +30,6 @@ createRoot(document.getElementById("root")!).render(
     <JobFormFix />
     <MarketplaceGalleryV2 />
     <ShopPhotoListingDecorator />
-    <ChatViewportFix />
     <BottomNavigation />
     <DemoKycHelper />
   </React.StrictMode>
