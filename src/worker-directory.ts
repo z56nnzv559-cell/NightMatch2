@@ -108,23 +108,31 @@ export async function handleWorkerDirectory(request: Request, env: Env) {
   if (candidates.length === 0) return Response.json({ workers: [] });
 
   // 写真まわりの不整合で女性一覧全体を500にしない。
-  // 一覧本体を先に成立させ、写真だけ取得できなければ非公開表示に落とす。
+  // 公開用の派生画像が実際に存在する写真だけURLを返す。
   try {
     const ids = candidates.map((worker) => worker.id);
     const placeholders = ids.map(() => "?").join(",");
     const photos = await env.DB.prepare(
-      `SELECT id, worker_id, face_mode
+      `SELECT id, worker_id, face_mode, variant_id
          FROM photos
         WHERE is_primary=1 AND worker_id IN (${placeholders})`
     )
       .bind(...ids)
-      .all<{ id: string; worker_id: string; face_mode: "open" | "eyes" | "blur" | "none" }>();
+      .all<{
+        id: string;
+        worker_id: string;
+        face_mode: "open" | "eyes" | "blur" | "none";
+        variant_id: string | null;
+      }>();
 
     const byWorker = new Map(photos.results.map((photo) => [photo.worker_id, photo]));
     for (const worker of candidates) {
       const photo = byWorker.get(worker.id);
-      if (!photo || photo.face_mode === "none") continue;
+      if (!photo || photo.face_mode === "none" || !photo.variant_id) continue;
       try {
+        // R2側に派生画像が無ければ、壊れた<img>を出さず「写真は非公開」に落とす。
+        const exists = await env.ORIGINALS.head(photo.variant_id);
+        if (!exists) continue;
         worker.photoUrl = await signImageUrl(env.IMG_SIGNING_KEY || env.JWT_SECRET, photo.id, 300);
       } catch (error) {
         console.error("worker directory photo signing failed", { workerId: worker.id, error });
