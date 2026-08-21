@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 const C = {
@@ -62,6 +62,10 @@ function initialOf(name) {
   return String(name || "?").trim().slice(0, 1) || "?";
 }
 
+function sameMessage(a, b) {
+  return a && b && a.from === b.from && a.body === b.body && Number(a.at || 0) === Number(b.at || 0);
+}
+
 function TalkList({ deals, summaries, loading, error, onOpen, onClose }) {
   return <section className="nm-line-sheet" aria-label="トーク一覧">
     <header className="nm-line-list-header">
@@ -85,6 +89,7 @@ function TalkList({ deals, summaries, loading, error, onOpen, onClose }) {
     <div className="nm-line-talk-list">
       {deals.map((deal) => {
         const summary = summaries[deal.id] || {};
+        const fallback = `${deal.area || ""}${deal.area && deal.business_type ? " · " : ""}${deal.business_type || ""}` || "トークを開く";
         return <button type="button" className="nm-line-talk-row" key={deal.id} onClick={() => onOpen(deal.id)}>
           <div className="nm-line-avatar">{initialOf(deal.counterpart_name)}</div>
           <div className="nm-line-talk-main">
@@ -92,7 +97,7 @@ function TalkList({ deals, summaries, loading, error, onOpen, onClose }) {
               <strong>{deal.counterpart_name}</strong>
               <time>{listTime(summary.at || deal.updated_at || deal.created_at)}</time>
             </div>
-            <div className="nm-line-talk-preview">{summary.body || `${deal.area || ""}${deal.area && deal.business_type ? " · " : ""}${deal.business_type || ""}` || "トークを開く"}</div>
+            <div className="nm-line-talk-preview">{summary.body || fallback}</div>
           </div>
           <svg className="nm-line-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
         </button>;
@@ -106,37 +111,97 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
   const [text, setText] = useState("");
   const [error, setError] = useState("");
   const [sending, setSending] = useState(false);
+  const [connected, setConnected] = useState(false);
   const scrollerRef = useRef(null);
   const textareaRef = useRef(null);
+  const socketRef = useRef(null);
   const lastCountRef = useRef(0);
+
+  const replaceMessages = useCallback((rows) => {
+    setMessages(rows);
+    onMessages(deal.id, rows);
+  }, [deal.id, onMessages]);
+
+  const loadHistory = useCallback(async () => {
+    const data = await api(`/api/deals/${encodeURIComponent(deal.id)}/messages`);
+    replaceMessages(data.messages || []);
+  }, [deal.id, replaceMessages]);
 
   useEffect(() => {
     setMessages(initialMessages || []);
+    setText("");
+    setError("");
+    setConnected(false);
   }, [deal.id]);
 
   useEffect(() => {
     let cancelled = false;
-    const load = async () => {
-      try {
-        const data = await api(`/api/deals/${encodeURIComponent(deal.id)}/messages`);
+    let socket = null;
+    let retryTimer = null;
+
+    const connect = () => {
+      if (cancelled) return;
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      socket = new WebSocket(`${protocol}//${window.location.host}/api/deals/${encodeURIComponent(deal.id)}/socket`);
+      socketRef.current = socket;
+
+      socket.addEventListener("open", () => {
+        if (!cancelled) {
+          setConnected(true);
+          setError("");
+        }
+      });
+
+      socket.addEventListener("message", (event) => {
         if (cancelled) return;
-        const rows = data.messages || [];
-        setMessages(rows);
-        onMessages(deal.id, rows);
-        setError("");
-      } catch (err) {
-        if (!cancelled) setError(String(err.message || err));
-      }
+        let incoming;
+        try { incoming = JSON.parse(event.data); } catch { return; }
+        if (!incoming?.body || !incoming?.from) return;
+        setMessages((current) => {
+          if (current.some((item) => sameMessage(item, incoming))) return current;
+          const next = [...current, incoming];
+          onMessages(deal.id, next);
+          return next;
+        });
+      });
+
+      socket.addEventListener("close", () => {
+        if (cancelled) return;
+        setConnected(false);
+        socketRef.current = null;
+        retryTimer = setTimeout(connect, 1800);
+      });
+
+      socket.addEventListener("error", () => {
+        if (!cancelled) setConnected(false);
+      });
     };
-    load();
-    const timer = setInterval(load, 1600);
-    return () => { cancelled = true; clearInterval(timer); };
-  }, [deal.id, onMessages]);
+
+    loadHistory().catch((err) => {
+      if (!cancelled) setError(String(err.message || err));
+    }).finally(connect);
+
+    const fallback = setInterval(() => {
+      loadHistory().catch(() => {});
+    }, 8000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(fallback);
+      if (retryTimer) clearTimeout(retryTimer);
+      if (socket) {
+        try { socket.close(); } catch {}
+      }
+      socketRef.current = null;
+    };
+  }, [deal.id, loadHistory, onMessages]);
 
   useEffect(() => {
     if (!scrollerRef.current) return;
     if (messages.length !== lastCountRef.current) {
-      scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
+      requestAnimationFrame(() => {
+        if (scrollerRef.current) scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
+      });
       lastCountRef.current = messages.length;
     }
   }, [messages]);
@@ -146,18 +211,35 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
     const body = text.trim();
     if (!body || sending) return;
     setSending(true);
+    setError("");
+
     try {
-      await api(`/api/deals/${encodeURIComponent(deal.id)}/messages`, {
-        method: "POST",
-        body: JSON.stringify({ body }),
-      });
-      setText("");
+      const socket = socketRef.current;
+      if (socket?.readyState === WebSocket.OPEN) {
+        const optimistic = {
+          dealId: deal.id,
+          from: `${session.kind}:local`,
+          body,
+          at: Date.now(),
+          optimistic: true,
+        };
+        setMessages((current) => {
+          const next = [...current, optimistic];
+          onMessages(deal.id, next);
+          return next;
+        });
+        socket.send(JSON.stringify({ body }));
+        setText("");
+        setTimeout(() => loadHistory().catch(() => {}), 900);
+      } else {
+        await api(`/api/deals/${encodeURIComponent(deal.id)}/messages`, {
+          method: "POST",
+          body: JSON.stringify({ body }),
+        });
+        setText("");
+        await loadHistory();
+      }
       if (textareaRef.current) textareaRef.current.focus();
-      const data = await api(`/api/deals/${encodeURIComponent(deal.id)}/messages`);
-      const rows = data.messages || [];
-      setMessages(rows);
-      onMessages(deal.id, rows);
-      setError("");
     } catch (err) {
       setError(String(err.message || err));
     } finally {
@@ -175,11 +257,11 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
     }
     const mine = String(message.from || "").startsWith(`${session.kind}:`);
     rendered.push(
-      <div className={`nm-line-message-row ${mine ? "mine" : "theirs"}`} key={`${message.at || index}-${index}`}>
+      <div className={`nm-line-message-row ${mine ? "mine" : "theirs"}`} key={`${message.at || index}-${index}-${message.optimistic ? "local" : "remote"}`}>
         {!mine && <div className="nm-line-message-avatar">{initialOf(deal.counterpart_name)}</div>}
         <div className="nm-line-message-stack">
           <div className="nm-line-bubble">{message.body}</div>
-          <time>{messageTime(message.at)}</time>
+          <div className="nm-line-message-meta"><time>{messageTime(message.at)}</time>{message.optimistic && <span>送信中</span>}</div>
         </div>
       </div>
     );
@@ -192,7 +274,7 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
       </button>
       <div className="nm-line-room-person">
         <strong>{deal.counterpart_name}</strong>
-        <span>{deal.area}{deal.area && deal.business_type ? " · " : ""}{deal.business_type}</span>
+        <span>{connected ? "接続中" : "再接続中"} · {deal.area}{deal.area && deal.business_type ? " · " : ""}{deal.business_type}</span>
       </div>
       <button type="button" className="nm-line-close" onClick={onClose} aria-label="チャットを閉じる">閉じる</button>
     </header>
@@ -221,7 +303,7 @@ function TalkRoom({ session, deal, initialMessages, onMessages, onBack, onClose 
 
 const css = `
 .nm-line-backdrop{position:fixed;z-index:270;inset:0;background:rgba(0,0,0,.76);display:flex;align-items:flex-end;justify-content:center}
-.nm-line-sheet{width:min(100%,720px);height:min(88vh,820px);background:${C.bg};color:${C.text};border:1px solid ${C.line};border-radius:22px 22px 0 0;box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden}
+.nm-line-sheet{width:min(100%,720px);height:min(88dvh,820px);background:${C.bg};color:${C.text};border:1px solid ${C.line};border-radius:22px 22px 0 0;box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden}
 .nm-line-list-header,.nm-line-room-header{min-height:66px;display:flex;align-items:center;border-bottom:1px solid ${C.line};background:rgba(16,13,20,.98);padding:10px 14px;box-sizing:border-box;flex-shrink:0}
 .nm-line-list-header{justify-content:space-between}.nm-line-kicker{font-size:10px;color:${C.gold};letter-spacing:.05em}.nm-line-list-header h2{margin:1px 0 0;font-size:24px}.nm-line-close{border:0;background:transparent;color:${C.sub};font-size:13px;padding:8px}
 .nm-line-notice{margin:12px;border:1px solid ${C.line};border-radius:13px;padding:12px;color:${C.sub};font-size:13px}.nm-line-notice.danger{border-color:${C.danger};color:${C.danger}}
@@ -230,9 +312,9 @@ const css = `
 .nm-line-avatar,.nm-line-message-avatar{border-radius:50%;display:grid;place-items:center;background:${C.surface2};color:${C.gold};font-weight:850;border:1px solid ${C.line};flex-shrink:0}.nm-line-avatar{width:48px;height:48px;font-size:18px}.nm-line-message-avatar{width:32px;height:32px;font-size:12px;margin-top:2px}
 .nm-line-talk-main{min-width:0}.nm-line-talk-top{display:flex;justify-content:space-between;align-items:center;gap:10px}.nm-line-talk-top strong{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nm-line-talk-top time{font-size:10px;color:${C.sub};white-space:nowrap}.nm-line-talk-preview{margin-top:5px;font-size:12px;color:${C.sub};overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nm-line-chevron{width:17px;height:17px;fill:none;stroke:${C.sub};stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .nm-line-room-header{display:grid;grid-template-columns:42px minmax(0,1fr) 48px;gap:5px}.nm-line-back{border:0;background:transparent;color:${C.text};width:40px;height:40px;display:grid;place-items:center}.nm-line-back svg{width:27px;height:27px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.nm-line-room-person{text-align:center;min-width:0;display:grid;gap:2px}.nm-line-room-person strong{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nm-line-room-person span{font-size:9px;color:${C.sub};overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nm-line-messages{flex:1;overflow:auto;padding:14px 10px 20px;background:${C.bg};display:flex;flex-direction:column;gap:7px;overscroll-behavior:contain}.nm-line-date{text-align:center;margin:7px 0}.nm-line-date span{display:inline-block;background:${C.surface2};color:${C.sub};font-size:9px;padding:4px 9px;border-radius:999px}.nm-line-message-row{display:flex;align-items:flex-end;gap:7px;max-width:88%}.nm-line-message-row.mine{align-self:flex-end;justify-content:flex-end}.nm-line-message-row.theirs{align-self:flex-start}.nm-line-message-stack{display:grid;gap:2px;min-width:0}.nm-line-message-row.mine .nm-line-message-stack{justify-items:end}.nm-line-message-row.theirs .nm-line-message-stack{justify-items:start}.nm-line-bubble{padding:9px 12px;border-radius:17px;font-size:14px;line-height:1.5;word-break:break-word;white-space:pre-wrap}.nm-line-message-row.mine .nm-line-bubble{background:${C.mint};color:#151018;border-bottom-right-radius:5px}.nm-line-message-row.theirs .nm-line-bubble{background:${C.surface2};color:${C.text};border-bottom-left-radius:5px}.nm-line-message-stack time{font-size:8px;color:${C.sub};padding:0 3px}.nm-line-room-empty{margin:auto;text-align:center;color:${C.sub};font-size:12px;line-height:1.7}.nm-line-room-error{padding:7px 12px;color:${C.danger};font-size:10px;text-align:center;background:rgba(229,125,139,.08)}
+.nm-line-messages{flex:1;overflow:auto;padding:14px 10px 20px;background:${C.bg};display:flex;flex-direction:column;gap:7px;overscroll-behavior:contain}.nm-line-date{text-align:center;margin:7px 0}.nm-line-date span{display:inline-block;background:${C.surface2};color:${C.sub};font-size:9px;padding:4px 9px;border-radius:999px}.nm-line-message-row{display:flex;align-items:flex-end;gap:7px;max-width:88%}.nm-line-message-row.mine{align-self:flex-end;justify-content:flex-end}.nm-line-message-row.theirs{align-self:flex-start}.nm-line-message-stack{display:grid;gap:2px;min-width:0}.nm-line-message-row.mine .nm-line-message-stack{justify-items:end}.nm-line-message-row.theirs .nm-line-message-stack{justify-items:start}.nm-line-bubble{padding:9px 12px;border-radius:17px;font-size:14px;line-height:1.5;word-break:break-word;white-space:pre-wrap}.nm-line-message-row.mine .nm-line-bubble{background:${C.mint};color:#151018;border-bottom-right-radius:5px}.nm-line-message-row.theirs .nm-line-bubble{background:${C.surface2};color:${C.text};border-bottom-left-radius:5px}.nm-line-message-meta{display:flex;gap:5px;align-items:center;font-size:8px;color:${C.sub};padding:0 3px}.nm-line-message-meta span{opacity:.75}.nm-line-room-empty{margin:auto;text-align:center;color:${C.sub};font-size:12px;line-height:1.7}.nm-line-room-error{padding:7px 12px;color:${C.danger};font-size:10px;text-align:center;background:rgba(229,125,139,.08)}
 .nm-line-compose{display:grid;grid-template-columns:minmax(0,1fr) 42px;gap:8px;align-items:end;border-top:1px solid ${C.line};padding:9px 10px calc(9px + env(safe-area-inset-bottom));background:${C.surface};flex-shrink:0}.nm-line-compose textarea{width:100%;box-sizing:border-box;max-height:100px;resize:none;border:1px solid ${C.line};background:${C.surface2};color:${C.text};border-radius:20px;padding:10px 13px;font:inherit;font-size:14px;line-height:1.4;outline:none}.nm-line-compose button{width:40px;height:40px;border:0;border-radius:50%;display:grid;place-items:center;background:${C.gold};color:#151018}.nm-line-compose button:disabled{opacity:.35}.nm-line-compose button svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-@media(min-width:720px){.nm-line-backdrop{align-items:center;padding:20px}.nm-line-sheet{height:min(80vh,760px);border-radius:22px}}
+@media(min-width:720px){.nm-line-backdrop{align-items:center;padding:20px}.nm-line-sheet{height:min(80dvh,760px);border-radius:22px}}
 `;
 
 export default function LineLikeChat({ session, onClose }) {
@@ -283,11 +365,13 @@ export default function LineLikeChat({ session, onClose }) {
     return () => { cancelled = true; };
   }, []);
 
-  const updateMessages = (dealId, messages) => {
+  const updateMessages = useCallback((dealId, messages) => {
     setMessageCache((current) => ({ ...current, [dealId]: messages }));
     const last = messages[messages.length - 1];
-    if (last) setSummaries((current) => ({ ...current, [dealId]: { body: last.body, at: last.at } }));
-  };
+    if (last) {
+      setSummaries((current) => ({ ...current, [dealId]: { body: last.body, at: last.at } }));
+    }
+  }, []);
 
   return createPortal(<><style>{css}</style><div className="nm-line-backdrop" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     {selected ? (
