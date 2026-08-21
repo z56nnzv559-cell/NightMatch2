@@ -81,7 +81,7 @@ function enhanceAreaInput(input, kind) {
   detailBox.appendChild(smallLabel(kind === "worker" ? "希望エリア" : "市区町村・エリア"));
   const detail = document.createElement("input");
   detail.type = "text";
-  detail.placeholder = kind === "worker" ? "例：中洲" : "例：中洲";
+  detail.placeholder = "例：中洲";
   detail.value = initial.detail;
   controlStyle(detail);
   detailBox.appendChild(detail);
@@ -220,20 +220,20 @@ export default function ProfileFormEnhancer() {
     let session = null;
     let cancelled = false;
 
-    api("/api/me").then((me) => { session = me?.session || null; scan(); }).catch(() => {});
+    const refreshSession = () => api("/api/me")
+      .then((me) => { if (!cancelled) { session = me?.session || null; scan(); } })
+      .catch(() => { if (!cancelled) session = null; });
 
     const scan = () => {
       if (cancelled) return;
 
-      // 店舗の新規登録フォーム。都道府県を直接入力させない。
       document.querySelectorAll('form input[name="area"]').forEach((input) => {
         const form = input.closest("form");
         if (!form) return;
-        if (form.querySelector('[name="trialPay"]')) return; // 求人作成フォームは対象外
+        if (form.querySelector('[name="trialPay"]')) return;
         enhanceAreaInput(input, "shop");
       });
 
-      // プロフィール編集画面。
       const dialog = document.querySelector('[role="dialog"]');
       const form = dialog?.querySelector("form");
       if (form) {
@@ -245,10 +245,12 @@ export default function ProfileFormEnhancer() {
       }
     };
 
+    refreshSession();
     scan();
+    const timer = setInterval(refreshSession, 2500);
     const observer = new MutationObserver(scan);
     observer.observe(document.body, { childList: true, subtree: true });
-    return () => { cancelled = true; observer.disconnect(); };
+    return () => { cancelled = true; clearInterval(timer); observer.disconnect(); };
   }, []);
 
   return null;
