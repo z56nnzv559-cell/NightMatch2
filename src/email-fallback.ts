@@ -10,7 +10,6 @@ type PendingFallback = {
 const SAFE_SUBJECT = "NightMatch：重要なお知らせ";
 const SAFE_TEXT =
   "NightMatchに重要なお知らせがあります。金額・相手の名称・メッセージ内容などの詳細はメールには記載していません。NightMatchへログインしてご確認ください。";
-const CLAIM_TTL_MINUTES = 15;
 
 function configured(env: Env) {
   return Boolean(
@@ -36,41 +35,6 @@ async function destination(env: Env, recipient: string) {
     .bind(shopId)
     .first<{ email: string }>();
   return owner?.email?.trim() || null;
-}
-
-async function claimFallback(env: Env, id: string) {
-  const claimed = await env.DB.prepare(
-    `UPDATE notification_fallbacks
-        SET email_claimed_at=datetime('now')
-      WHERE id=? AND sent_at IS NULL
-        AND (
-          email_claimed_at IS NULL OR
-          email_claimed_at < datetime('now', ?)
-        )`
-  )
-    .bind(id, `-${CLAIM_TTL_MINUTES} minutes`)
-    .run();
-  return (claimed.meta.changes ?? 0) > 0;
-}
-
-async function releaseClaim(env: Env, id: string) {
-  await env.DB.prepare(
-    `UPDATE notification_fallbacks
-        SET email_claimed_at=NULL
-      WHERE id=? AND sent_at IS NULL`
-  )
-    .bind(id)
-    .run();
-}
-
-async function markSent(env: Env, id: string) {
-  await env.DB.prepare(
-    `UPDATE notification_fallbacks
-        SET sent_at=datetime('now'), email_claimed_at=NULL
-      WHERE id=? AND sent_at IS NULL`
-  )
-    .bind(id)
-    .run();
 }
 
 async function sendCloudflareEmail(env: Env, to: string) {
@@ -109,25 +73,22 @@ export async function trySendFallbackEmail(env: Env, row: PendingFallback) {
   const to = await destination(env, row.recipient);
   if (!to) return { status: "no_destination" as const };
 
-  /* queue直後とcronが同時に拾っても1通にする。古いclaimは再利用できる。 */
-  if (!(await claimFallback(env, row.id))) {
-    return { status: "already_claimed" as const };
-  }
-
-  try {
-    await sendCloudflareEmail(env, to);
-    await markSent(env, row.id);
-    return { status: "sent" as const };
-  } catch (error) {
-    /* 一時障害なら次回のflushで再送できるようclaimを戻す。 */
-    await releaseClaim(env, row.id).catch(() => {});
-    throw error;
-  }
+  await sendCloudflareEmail(env, to);
+  await env.DB.prepare(
+    `UPDATE notification_fallbacks SET sent_at=datetime('now')
+      WHERE id=? AND sent_at IS NULL`
+  )
+    .bind(row.id)
+    .run();
+  return { status: "sent" as const };
 }
 
 /*
  * Pushが落ちた直後とcronの両方から呼ぶ。
  * メール設定が無い/一時障害ならsent_atを付けず、次回の実行で再試行する。
+ *
+ * 現在のCloudflare Git deployはD1 migrationを自動適用しないため、
+ * 本番互換性を優先し、notification_fallbacksの既存列だけで動かす。
  */
 export async function flushFallbackEmails(env: Env, limit = 50) {
   const rows = await env.DB.prepare(
@@ -135,14 +96,10 @@ export async function flushFallbackEmails(env: Env, limit = 50) {
        FROM notification_fallbacks
       WHERE sent_at IS NULL
         AND (recipient='admin' OR recipient LIKE 'shop:%')
-        AND (
-          email_claimed_at IS NULL OR
-          email_claimed_at < datetime('now', ?)
-        )
       ORDER BY created_at ASC
       LIMIT ?`
   )
-    .bind(`-${CLAIM_TTL_MINUTES} minutes`, Math.min(Math.max(limit, 1), 100))
+    .bind(Math.min(Math.max(limit, 1), 100))
     .all<PendingFallback>();
 
   let sent = 0;

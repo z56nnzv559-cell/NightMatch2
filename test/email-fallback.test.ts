@@ -56,7 +56,7 @@ it("店舗ownerへ安全な本文だけをCloudflare Email Serviceで送る", as
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     requestUrl = String(input);
     requestBody = JSON.parse(String(init?.body || "{}"));
-    return new Response(JSON.stringify({ success: true, result: { delivered: ["owner@example.jp"] } }), {
+    return new Response(JSON.stringify({ success: true }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
@@ -74,13 +74,10 @@ it("店舗ownerへ安全な本文だけをCloudflare Email Serviceで送る", as
   expect(JSON.stringify(requestBody)).not.toContain("¥");
   expect(JSON.stringify(requestBody)).not.toContain("キャバ");
 
-  const row = await env.DB.prepare(
-    `SELECT sent_at, email_claimed_at FROM notification_fallbacks WHERE id=?`
-  )
+  const row = await env.DB.prepare(`SELECT sent_at FROM notification_fallbacks WHERE id=?`)
     .bind(id)
-    .first<{ sent_at: string | null; email_claimed_at: string | null }>();
+    .first<{ sent_at: string | null }>();
   expect(row?.sent_at).not.toBeNull();
-  expect(row?.email_claimed_at).toBeNull();
 });
 
 it("運営宛は設定した運営メールへ送る", async () => {
@@ -103,7 +100,7 @@ it("運営宛は設定した運営メールへ送る", async () => {
   expect(row?.sent_at).not.toBeNull();
 });
 
-it("本人宛はメールせず#45の次回ログイン通知用に残す", async () => {
+it("本人宛はメールせず次回ログイン通知用に残す", async () => {
   const workerId = await seedWorker();
   const id = await addFallback(`worker:${workerId}`, "trial.report_reminder");
   const fetchMock = vi.fn();
@@ -118,7 +115,7 @@ it("本人宛はメールせず#45の次回ログイン通知用に残す", asyn
   expect(row?.sent_at).toBeNull();
 });
 
-it("Email Serviceが失敗してもclaimを解除して次回再試行できる", async () => {
+it("Email Serviceが失敗しても未送信のまま残して次回再試行できる", async () => {
   const shopId = await seedShop();
   await addOwner(shopId, "retry@example.jp");
   const id = await addFallback(`shop:${shopId}`);
@@ -126,13 +123,10 @@ it("Email Serviceが失敗してもclaimを解除して次回再試行できる"
   vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ success: false }), { status: 503 }));
   const result = await flushFallbackEmails(withEmailConfig());
   expect(result.failed).toBe(1);
-  const row = await env.DB.prepare(
-    `SELECT sent_at, email_claimed_at FROM notification_fallbacks WHERE id=?`
-  )
+  const row = await env.DB.prepare(`SELECT sent_at FROM notification_fallbacks WHERE id=?`)
     .bind(id)
-    .first<{ sent_at: string | null; email_claimed_at: string | null }>();
+    .first<{ sent_at: string | null }>();
   expect(row?.sent_at).toBeNull();
-  expect(row?.email_claimed_at).toBeNull();
 });
 
 it("メール設定が未完了でも通知キューを壊さずDBに残す", async () => {
@@ -149,33 +143,4 @@ it("メール設定が未完了でも通知キューを壊さずDBに残す", as
     .bind(id)
     .first<{ sent_at: string | null }>();
   expect(row?.sent_at).toBeNull();
-});
-
-it("queue直後とcronが同時にflushしても同じfallbackは1通だけ送る", async () => {
-  /* 前ケースが意図的に残した未送信fallbackは、この競合テストの対象外。 */
-  await env.DB.prepare(
-    `DELETE FROM notification_fallbacks
-      WHERE recipient='admin' OR recipient LIKE 'shop:%'`
-  ).run();
-
-  const shopId = await seedShop();
-  await addOwner(shopId, "once@example.jp");
-  await addFallback(`shop:${shopId}`);
-
-  let sends = 0;
-  vi.stubGlobal("fetch", async () => {
-    sends += 1;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    return new Response(JSON.stringify({ success: true }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  });
-
-  await Promise.all([
-    flushFallbackEmails(withEmailConfig()),
-    flushFallbackEmails(withEmailConfig()),
-  ]);
-
-  expect(sends).toBe(1);
 });
