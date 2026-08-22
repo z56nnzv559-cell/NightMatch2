@@ -132,13 +132,13 @@ export default function DemoKycHelper() {
     if (mode !== "worker") return undefined;
 
     const inject = () => {
+      if (launcherRef.current?.isConnected) return;
       const heading = Array.from(document.querySelectorAll("h1")).find((node) =>
         node.textContent?.includes("求人を見る前に本人確認")
       );
       const card = heading?.closest("section");
       if (!card) return;
 
-      if (launcherRef.current?.isConnected) launcherRef.current.remove();
       const box = document.createElement("div");
       box.dataset.nightmatchKycLauncher = "1";
       Object.assign(box.style, { display: "grid", gap: "8px", marginTop: "4px" });
