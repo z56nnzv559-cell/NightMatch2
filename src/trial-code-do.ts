@@ -168,6 +168,12 @@ const CONTACT = /(line\s*id|ライン|@[\w.-]{3,}|0[789]0[-\s]?\d{4}[-\s]?\d{4})
 type Msg = { dealId: string; from: string; body: string; at: number };
 type SocketIdentity = { dealId: string; from: string };
 
+function sideOf(from: string): Side | null {
+  if (from.startsWith("worker:")) return "worker";
+  if (from.startsWith("shop:")) return "shop";
+  return null;
+}
+
 export class Conversation extends DurableObject<Env> {
   async fetch(req: Request) {
     const url = new URL(req.url);
@@ -190,9 +196,23 @@ export class Conversation extends DurableObject<Env> {
         limit: 200,
         reverse: true,
       });
-      return Response.json({
-        messages: [...stored.values()].reverse(),
+      const [workerReadAt, shopReadAt] = await Promise.all([
+        this.ctx.storage.get<number>("read:worker"),
+        this.ctx.storage.get<number>("read:shop"),
+      ]);
+      const reads: Record<Side, number> = {
+        worker: workerReadAt ?? 0,
+        shop: shopReadAt ?? 0,
+      };
+      const messages = [...stored.values()].reverse().map((message) => {
+        const sender = sideOf(message.from);
+        const reader: Side | null = sender === "worker" ? "shop" : sender === "shop" ? "worker" : null;
+        return {
+          ...message,
+          read: reader ? reads[reader] >= message.at : false,
+        };
       });
+      return Response.json({ messages });
     }
 
     if (req.headers.get("upgrade") !== "websocket") {
@@ -219,11 +239,16 @@ export class Conversation extends DurableObject<Env> {
       return;
     }
 
-    let incoming: { body?: unknown };
+    let incoming: { body?: unknown; type?: unknown };
     try {
-      incoming = JSON.parse(raw) as { body?: unknown };
+      incoming = JSON.parse(raw) as { body?: unknown; type?: unknown };
     } catch {
       ws.send(JSON.stringify({ error: "invalid_json" }));
+      return;
+    }
+
+    if (incoming.type === "read") {
+      await this.markRead(identity);
       return;
     }
 
@@ -265,6 +290,25 @@ export class Conversation extends DurableObject<Env> {
       .first<{ worker_id: string; shop_id: string }>();
     if (!deal) return false;
     return from === `worker:${deal.worker_id}` || from === `shop:${deal.shop_id}`;
+  }
+
+  private async markRead(identity: SocketIdentity) {
+    const side = sideOf(identity.from);
+    if (!side) return;
+
+    const at = Date.now();
+    await this.ctx.storage.put(`read:${side}`, at);
+    const event = JSON.stringify({ type: "read", by: side, at });
+
+    for (const peer of this.ctx.getWebSockets()) {
+      const peerIdentity = peer.deserializeAttachment() as SocketIdentity | null;
+      if (
+        peerIdentity?.dealId === identity.dealId &&
+        peerIdentity.from !== identity.from
+      ) {
+        peer.send(event);
+      }
+    }
   }
 
   private async notifyCounterpart(dealId: string, from: string) {
