@@ -7,6 +7,58 @@ type AdminVars = { admin: string };
 type AdminApp = { Bindings: Env; Variables: AdminVars };
 const extra = new Hono<AdminApp>();
 
+type Jwk = { kid: string; kty: string; n: string; e: string; alg: string };
+const b64u = (s: string) =>
+  Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+
+async function accessKeys(env: Env): Promise<Jwk[]> {
+  const cached = await env.CACHE.get<Jwk[]>("access:jwks", "json");
+  if (cached) return cached;
+  const res = await fetch(`https://${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`);
+  const body = await res.json<{ keys: Jwk[] }>();
+  await env.CACHE.put("access:jwks", JSON.stringify(body.keys), { expirationTtl: 3600 });
+  return body.keys;
+}
+
+async function verifyAccessJwt(env: Env, token: string | undefined) {
+  if (!token) return null;
+  const [h, p, s] = token.split(".");
+  if (!h || !p || !s) return null;
+  const header = JSON.parse(new TextDecoder().decode(b64u(h))) as { kid: string };
+  const jwk = (await accessKeys(env)).find((k) => k.kid === header.kid);
+  if (!jwk) return null;
+  const key = await crypto.subtle.importKey(
+    "jwk",
+    { kty: jwk.kty, n: jwk.n, e: jwk.e, alg: "RS256", ext: true },
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["verify"]
+  );
+  const ok = await crypto.subtle.verify(
+    "RSASSA-PKCS1-v1_5",
+    key,
+    b64u(s),
+    new TextEncoder().encode(`${h}.${p}`)
+  );
+  if (!ok) return null;
+  const claims = JSON.parse(new TextDecoder().decode(b64u(p))) as {
+    aud: string[] | string;
+    email: string;
+    exp: number;
+  };
+  const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+  if (!aud.includes(env.ACCESS_AUD)) return null;
+  if (claims.exp < Math.floor(Date.now() / 1000)) return null;
+  return claims.email;
+}
+
+extra.use("*", async (c, next) => {
+  const email = await verifyAccessJwt(c.env, c.req.header("cf-access-jwt-assertion"));
+  if (!email) return c.json({ error: "forbidden" }, 403);
+  c.set("admin", email);
+  await next();
+});
+
 type KycFiles = {
   id: string;
   worker_id: string;
