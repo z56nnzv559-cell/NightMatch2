@@ -5,7 +5,11 @@ async function readJson(path, options) {
   const text = await res.text();
   let body = {};
   try { body = text ? JSON.parse(text) : {}; } catch { body = {}; }
-  if (!res.ok) throw new Error(body.error || `request_failed_${res.status}`);
+  if (!res.ok) {
+    const error = new Error(body.error || `request_failed_${res.status}`);
+    error.body = body;
+    throw error;
+  }
   return body;
 }
 
@@ -18,6 +22,7 @@ const COLORS = {
   sub: "#A99CB0",
   gold: "#E2B968",
   danger: "#E57D8B",
+  ok: "#7DD2BB",
 };
 
 function ActionButton({ children, onClick, disabled, secondary = false }) {
@@ -59,7 +64,7 @@ function FilePicker({ label, capture = "environment", onChange, file }) {
       <strong>{label}</strong>
       <input
         type="file"
-        accept="image/*"
+        accept="image/jpeg,image/png,image/webp"
         capture={capture}
         onChange={(event) => onChange(event.target.files?.[0] || null)}
         style={{ color: COLORS.sub, fontSize: 13 }}
@@ -71,15 +76,11 @@ function FilePicker({ label, capture = "environment", onChange, file }) {
   );
 }
 
-/*
- * 働く本人の本人確認導線。
- * - workers.dev では画像をサーバー送信せず、画面フローを確認した後にデモKYCを完了する。
- * - 正式公開ではこのUIから外部eKYCへ接続する。顔照合・ライブネス判定を自前実装しない。
- * - マイナンバーカードは表面のみを本人確認に使い、個人番号が記載された裏面は取得しない。
- */
 export default function DemoKycHelper() {
   const [mode, setMode] = useState(null);
   const [demoAvailable, setDemoAvailable] = useState(false);
+  const [status, setStatus] = useState("not_submitted");
+  const [statusNote, setStatusNote] = useState("");
   const [open, setOpen] = useState(false);
   const [step, setStep] = useState(1);
   const [documentType, setDocumentType] = useState("");
@@ -88,13 +89,12 @@ export default function DemoKycHelper() {
   const [selfieFile, setSelfieFile] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [launcherInjected, setLauncherInjected] = useState(false);
   const launcherRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
     Promise.all([readJson("/api/config"), readJson("/api/me")])
-      .then(([config, me]) => {
+      .then(async ([config, me]) => {
         if (cancelled) return;
         const isDemo = Boolean(config.demoKycAvailable);
         setDemoAvailable(isDemo);
@@ -105,6 +105,13 @@ export default function DemoKycHelper() {
           me.status !== "banned"
         ) {
           setMode("worker");
+          try {
+            const current = await readJson("/api/kyc/manual/status");
+            if (!cancelled) {
+              setStatus(current.status || "not_submitted");
+              setStatusNote(current.note || "");
+            }
+          } catch {}
           return;
         }
 
@@ -125,55 +132,66 @@ export default function DemoKycHelper() {
     if (mode !== "worker") return undefined;
 
     const inject = () => {
-      if (launcherRef.current?.isConnected) return;
       const heading = Array.from(document.querySelectorAll("h1")).find((node) =>
         node.textContent?.includes("求人を見る前に本人確認")
       );
       const card = heading?.closest("section");
       if (!card) return;
 
-      const existing = card.querySelector("[data-nightmatch-kyc-launcher='1']");
-      if (existing) {
-        launcherRef.current = existing;
-        setLauncherInjected(true);
-        return;
-      }
+      if (launcherRef.current?.isConnected) launcherRef.current.remove();
+      const box = document.createElement("div");
+      box.dataset.nightmatchKycLauncher = "1";
+      Object.assign(box.style, { display: "grid", gap: "8px", marginTop: "4px" });
 
       const button = document.createElement("button");
       button.type = "button";
-      button.dataset.nightmatchKycLauncher = "1";
-      button.textContent = "本人確認をはじめる";
+      const pending = status === "pending";
+      const failed = status === "failed";
+      button.textContent = pending
+        ? "本人確認書類を審査中"
+        : failed
+          ? "本人確認を再提出する"
+          : "本人確認をはじめる";
+      button.disabled = pending;
       Object.assign(button.style, {
         width: "100%",
         border: "0",
         borderRadius: "12px",
         padding: "14px 16px",
-        marginTop: "4px",
         fontWeight: "700",
         fontSize: "15px",
-        background: COLORS.gold,
-        color: "#151018",
-        cursor: "pointer",
+        background: pending ? COLORS.surface2 : COLORS.gold,
+        color: pending ? COLORS.sub : "#151018",
+        opacity: pending ? ".85" : "1",
       });
-      button.addEventListener("click", () => setOpen(true));
-      card.appendChild(button);
-      launcherRef.current = button;
-      setLauncherInjected(true);
+      if (!pending) button.addEventListener("click", () => setOpen(true));
+      box.appendChild(button);
+
+      if (pending) {
+        const note = document.createElement("div");
+        note.textContent = "運営が身分証とセルフィーを確認しています。承認後に求人機能が利用できます。";
+        Object.assign(note.style, { color: COLORS.sub, fontSize: "12px", lineHeight: "1.6" });
+        box.appendChild(note);
+      } else if (failed && statusNote) {
+        const note = document.createElement("div");
+        note.textContent = `再提出理由：${statusNote}`;
+        Object.assign(note.style, { color: COLORS.danger, fontSize: "12px", lineHeight: "1.6" });
+        box.appendChild(note);
+      }
+
+      card.appendChild(box);
+      launcherRef.current = box;
     };
 
     inject();
     const observer = new MutationObserver(inject);
     observer.observe(document.body, { childList: true, subtree: true });
-
     return () => {
       observer.disconnect();
-      if (launcherRef.current?.dataset?.nightmatchKycLauncher === "1") {
-        launcherRef.current.remove();
-      }
+      launcherRef.current?.remove();
       launcherRef.current = null;
-      setLauncherInjected(false);
     };
-  }, [mode]);
+  }, [mode, status, statusNote]);
 
   if (!mode) return null;
 
@@ -188,19 +206,38 @@ export default function DemoKycHelper() {
     setError("");
   };
 
-  const verifyDemo = async () => {
+  const submitManual = async () => {
+    if (!frontFile || !selfieFile || (documentType === "license" && !backFile)) {
+      setError("必要な写真をすべて選択してください");
+      return;
+    }
     setBusy(true);
     setError("");
     try {
-      if (mode === "worker") {
-        if (!frontFile || !selfieFile || (documentType === "license" && !backFile)) {
-          throw new Error("必要な写真をすべて選択してください");
-        }
-        if (!demoAvailable) {
-          throw new Error("本番eKYCの接続先がまだ設定されていません。外部eKYC接続後にこのまま利用できます。");
-        }
-      }
+      const form = new FormData();
+      form.append("documentType", documentType);
+      form.append("front", frontFile);
+      if (documentType === "license" && backFile) form.append("back", backFile);
+      form.append("selfie", selfieFile);
+      await readJson("/api/kyc/manual", { method: "POST", body: form });
+      setStatus("pending");
+      resetFlow();
+      window.location.reload();
+    } catch (err) {
+      const code = err?.body?.error || err?.message || "送信に失敗しました";
+      setError(
+        code === "invalid_or_missing_image"
+          ? "画像はJPEG・PNG・WebP、1枚8MB以下で提出してください"
+          : String(code)
+      );
+      setBusy(false);
+    }
+  };
 
+  const verifyShopDemo = async () => {
+    setBusy(true);
+    setError("");
+    try {
       await readJson("/api/kyc/demo-verify", { method: "POST" });
       window.location.reload();
     } catch (err) {
@@ -229,201 +266,119 @@ export default function DemoKycHelper() {
         }}
       >
         <div style={{ color: COLORS.gold, fontSize: 12, marginBottom: 6 }}>デモ環境</div>
-        <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 6 }}>
+        <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 8 }}>
           店舗確認をテスト完了して管理画面へ進む
         </div>
         {error && <div style={{ color: COLORS.danger, fontSize: 12, marginBottom: 8 }}>{error}</div>}
-        <ActionButton onClick={verifyDemo} disabled={busy}>
+        <ActionButton onClick={verifyShopDemo} disabled={busy || !demoAvailable}>
           {busy ? "確認中…" : "デモ店舗確認を完了する"}
         </ActionButton>
       </div>
     );
   }
 
-  return (
-    <>
-      {!launcherInjected && (
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          style={{
-            position: "fixed",
-            left: 16,
-            right: 16,
-            bottom: 104,
-            zIndex: 110,
-            maxWidth: 560,
-            margin: "0 auto",
-            border: 0,
-            borderRadius: 14,
-            padding: "14px 16px",
-            fontWeight: 700,
-            fontSize: 15,
-            background: COLORS.gold,
-            color: "#151018",
-            boxShadow: "0 14px 38px rgba(0,0,0,.35)",
-          }}
-        >
-          本人確認をはじめる
-        </button>
-      )}
-
-      {open && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 1000,
-            background: "rgba(8,6,10,.86)",
-            display: "grid",
-            alignItems: "end",
-            color: COLORS.text,
-          }}
-        >
-          <div
-            style={{
-              width: "100%",
-              maxWidth: 620,
-              maxHeight: "92vh",
-              overflowY: "auto",
-              margin: "0 auto",
-              padding: "18px 16px calc(24px + env(safe-area-inset-bottom))",
-              borderRadius: "24px 24px 0 0",
-              border: `1px solid ${COLORS.line}`,
-              background: COLORS.bg,
-              boxShadow: "0 -18px 55px rgba(0,0,0,.5)",
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "center" }}>
-              <div>
-                <div style={{ color: COLORS.gold, fontSize: 12 }}>本人確認 {step}/4</div>
-                <h2 style={{ margin: "4px 0 0", fontSize: 22 }}>本人確認を完了する</h2>
-              </div>
-              <button
-                type="button"
-                onClick={resetFlow}
-                aria-label="閉じる"
-                style={{ border: 0, background: "transparent", color: COLORS.sub, fontSize: 28 }}
-              >
-                ×
-              </button>
-            </div>
-
-            <div style={{ marginTop: 16, display: "grid", gap: 14 }}>
-              {step === 1 && (
-                <>
-                  <p style={{ margin: 0, color: COLORS.sub, fontSize: 14, lineHeight: 1.7 }}>
-                    使用する本人確認書類を選択してください。本人確認書類とセルフィーで確認します。
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => setDocumentType("mynumber")}
-                    style={{
-                      padding: 16,
-                      borderRadius: 14,
-                      border: `1px solid ${documentType === "mynumber" ? COLORS.gold : COLORS.line}`,
-                      background: COLORS.surface,
-                      color: COLORS.text,
-                      textAlign: "left",
-                    }}
-                  >
-                    <strong>マイナンバーカード</strong>
-                    <span style={{ display: "block", marginTop: 5, color: COLORS.sub, fontSize: 12 }}>
-                      表面のみ使用します。個人番号が記載された裏面は撮影・送信しません。
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setDocumentType("license")}
-                    style={{
-                      padding: 16,
-                      borderRadius: 14,
-                      border: `1px solid ${documentType === "license" ? COLORS.gold : COLORS.line}`,
-                      background: COLORS.surface,
-                      color: COLORS.text,
-                      textAlign: "left",
-                    }}
-                  >
-                    <strong>運転免許証</strong>
-                    <span style={{ display: "block", marginTop: 5, color: COLORS.sub, fontSize: 12 }}>
-                      表面・裏面を撮影します。
-                    </span>
-                  </button>
-                  <ActionButton disabled={!documentType} onClick={() => setStep(2)}>
-                    次へ
-                  </ActionButton>
-                </>
-              )}
-
-              {step === 2 && (
-                <>
-                  <p style={{ margin: 0, color: COLORS.sub, fontSize: 14, lineHeight: 1.7 }}>
-                    {documentType === "mynumber"
-                      ? "マイナンバーカードの表面を、文字と顔写真がはっきり見えるように撮影してください。"
-                      : "運転免許証の表面と裏面を、文字がはっきり見えるように撮影してください。"}
-                  </p>
-                  <FilePicker
-                    label={documentType === "mynumber" ? "マイナンバーカード 表面" : "運転免許証 表面"}
-                    file={frontFile}
-                    onChange={setFrontFile}
-                  />
-                  {documentType === "license" && (
-                    <FilePicker label="運転免許証 裏面" file={backFile} onChange={setBackFile} />
-                  )}
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                    <ActionButton secondary onClick={() => setStep(1)}>戻る</ActionButton>
-                    <ActionButton
-                      disabled={!frontFile || (documentType === "license" && !backFile)}
-                      onClick={() => setStep(3)}
-                    >
-                      次へ
-                    </ActionButton>
-                  </div>
-                </>
-              )}
-
-              {step === 3 && (
-                <>
-                  <p style={{ margin: 0, color: COLORS.sub, fontSize: 14, lineHeight: 1.7 }}>
-                    顔全体が明るく、帽子・マスク・サングラスを外した状態でセルフィーを撮影してください。
-                  </p>
-                  <FilePicker label="セルフィー" capture="user" file={selfieFile} onChange={setSelfieFile} />
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                    <ActionButton secondary onClick={() => setStep(2)}>戻る</ActionButton>
-                    <ActionButton disabled={!selfieFile} onClick={() => setStep(4)}>確認へ</ActionButton>
-                  </div>
-                </>
-              )}
-
-              {step === 4 && (
-                <>
-                  <div style={{ padding: 14, borderRadius: 14, background: COLORS.surface, border: `1px solid ${COLORS.line}` }}>
-                    <div style={{ fontWeight: 700 }}>提出内容</div>
-                    <div style={{ marginTop: 8, color: COLORS.sub, fontSize: 13, lineHeight: 1.8 }}>
-                      書類：{documentType === "mynumber" ? "マイナンバーカード（表面）" : "運転免許証（表面・裏面）"}<br />
-                      セルフィー：撮影済み
-                    </div>
-                  </div>
-                  <div style={{ padding: 12, borderRadius: 12, border: `1px solid ${COLORS.gold}`, color: COLORS.gold, fontSize: 12, lineHeight: 1.7 }}>
-                    {demoAvailable
-                      ? "現在はworkers.devのデモです。選択した画像はサーバーへ送信せず、本人確認の操作フローだけをテストします。"
-                      : "正式公開では外部eKYCサービスで本人確認・顔照合・ライブネス判定を行います。"}
-                  </div>
-                  {error && <div style={{ color: COLORS.danger, fontSize: 12 }}>{error}</div>}
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                    <ActionButton secondary disabled={busy} onClick={() => setStep(3)}>戻る</ActionButton>
-                    <ActionButton disabled={busy} onClick={verifyDemo}>
-                      {busy ? "確認中…" : demoAvailable ? "本人確認を完了する" : "本人確認を送信する"}
-                    </ActionButton>
-                  </div>
-                </>
-              )}
-            </div>
+  return open ? (
+    <div
+      role="dialog"
+      aria-modal="true"
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 1000,
+        background: "rgba(8,6,10,.86)",
+        display: "grid",
+        alignItems: "end",
+        color: COLORS.text,
+      }}
+    >
+      <div
+        style={{
+          width: "100%",
+          maxWidth: 620,
+          maxHeight: "92vh",
+          overflowY: "auto",
+          margin: "0 auto",
+          padding: "18px 16px calc(24px + env(safe-area-inset-bottom))",
+          borderRadius: "24px 24px 0 0",
+          border: `1px solid ${COLORS.line}`,
+          background: COLORS.bg,
+          boxShadow: "0 -18px 55px rgba(0,0,0,.5)",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "center" }}>
+          <div>
+            <div style={{ color: COLORS.gold, fontSize: 12 }}>本人確認 {step}/4</div>
+            <h2 style={{ margin: "4px 0 0", fontSize: 22 }}>本人確認を完了する</h2>
           </div>
+          <button type="button" onClick={resetFlow} style={{ border: 0, background: "transparent", color: COLORS.sub, fontSize: 28 }}>×</button>
         </div>
-      )}
-    </>
-  );
+
+        <div style={{ marginTop: 16, display: "grid", gap: 14 }}>
+          {step === 1 && (
+            <>
+              <p style={{ margin: 0, color: COLORS.sub, fontSize: 14, lineHeight: 1.7 }}>
+                本人確認書類とセルフィーをNightMatch運営が確認します。承認後に登録完了となります。
+              </p>
+              <button type="button" onClick={() => setDocumentType("mynumber")} style={{ padding: 16, borderRadius: 14, border: `1px solid ${documentType === "mynumber" ? COLORS.gold : COLORS.line}`, background: COLORS.surface, color: COLORS.text, textAlign: "left" }}>
+                <strong>マイナンバーカード</strong>
+                <span style={{ display: "block", marginTop: 5, color: COLORS.sub, fontSize: 12 }}>表面のみ。個人番号が記載された裏面は提出しません。</span>
+              </button>
+              <button type="button" onClick={() => setDocumentType("license")} style={{ padding: 16, borderRadius: 14, border: `1px solid ${documentType === "license" ? COLORS.gold : COLORS.line}`, background: COLORS.surface, color: COLORS.text, textAlign: "left" }}>
+                <strong>運転免許証</strong>
+                <span style={{ display: "block", marginTop: 5, color: COLORS.sub, fontSize: 12 }}>表面・裏面を撮影します。</span>
+              </button>
+              <ActionButton disabled={!documentType} onClick={() => setStep(2)}>次へ</ActionButton>
+            </>
+          )}
+
+          {step === 2 && (
+            <>
+              <p style={{ margin: 0, color: COLORS.sub, fontSize: 14, lineHeight: 1.7 }}>
+                文字・生年月日・顔写真がはっきり見えるように撮影してください。
+              </p>
+              <FilePicker label={documentType === "mynumber" ? "マイナンバーカード 表面" : "運転免許証 表面"} file={frontFile} onChange={setFrontFile} />
+              {documentType === "license" && <FilePicker label="運転免許証 裏面" file={backFile} onChange={setBackFile} />}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <ActionButton secondary onClick={() => setStep(1)}>戻る</ActionButton>
+                <ActionButton disabled={!frontFile || (documentType === "license" && !backFile)} onClick={() => setStep(3)}>次へ</ActionButton>
+              </div>
+            </>
+          )}
+
+          {step === 3 && (
+            <>
+              <p style={{ margin: 0, color: COLORS.sub, fontSize: 14, lineHeight: 1.7 }}>
+                本人確認書類の顔写真と照合するため、正面からセルフィーを撮影してください。
+              </p>
+              <FilePicker label="セルフィー" capture="user" file={selfieFile} onChange={setSelfieFile} />
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <ActionButton secondary onClick={() => setStep(2)}>戻る</ActionButton>
+                <ActionButton disabled={!selfieFile} onClick={() => setStep(4)}>確認へ</ActionButton>
+              </div>
+            </>
+          )}
+
+          {step === 4 && (
+            <>
+              <div style={{ padding: 14, borderRadius: 14, background: COLORS.surface, border: `1px solid ${COLORS.line}` }}>
+                <div style={{ fontWeight: 700 }}>提出内容</div>
+                <div style={{ marginTop: 8, color: COLORS.sub, fontSize: 13, lineHeight: 1.8 }}>
+                  書類：{documentType === "mynumber" ? "マイナンバーカード（表面）" : "運転免許証（表面・裏面）"}<br />
+                  セルフィー：撮影済み
+                </div>
+              </div>
+              <div style={{ padding: 12, borderRadius: 12, border: `1px solid ${COLORS.gold}`, color: COLORS.gold, fontSize: 12, lineHeight: 1.7 }}>
+                提出画像は非公開領域に保存し、運営による承認・却下後に削除します。審査が完了するまで求人・応募機能は利用できません。
+              </div>
+              {error && <div style={{ color: COLORS.danger, fontSize: 12 }}>{error}</div>}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <ActionButton secondary disabled={busy} onClick={() => setStep(3)}>戻る</ActionButton>
+                <ActionButton disabled={busy} onClick={submitManual}>{busy ? "送信中…" : "本人確認を提出する"}</ActionButton>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  ) : null;
 }
