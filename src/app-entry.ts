@@ -1,4 +1,5 @@
 import app from "./main";
+import adminExtra from "./admin-extra";
 import {
   type Env,
   type NotifyMessage,
@@ -15,6 +16,7 @@ import {
   snapshotOpenJobIds,
 } from "./job-management";
 import { handleKycWebhook } from "./kyc";
+import { handleManualKycStatus, handleManualKycSubmit } from "./manual-kyc";
 import { handleProfileGet, handleProfilePatch } from "./profile";
 import { handleSafeShiftReport } from "./reference-integrity";
 
@@ -140,9 +142,29 @@ async function handleShopJobs(request: Request, env: AppEnv) {
   return Response.json({ jobs });
 }
 
+function adminExtraRequest(request: Request, url: URL) {
+  const nextUrl = new URL(request.url);
+  nextUrl.pathname = url.pathname.slice("/admin".length) || "/";
+  return new Request(nextUrl.toString(), {
+    method: request.method,
+    headers: request.headers,
+    body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
+  });
+}
+
 export default {
   async fetch(request: Request, env: AppEnv, ctx: ExecutionContext) {
     const url = new URL(request.url);
+
+    if (
+      url.pathname === "/admin/ops" ||
+      url.pathname.startsWith("/admin/kyc/") ||
+      url.pathname === "/admin/kyc/pending" ||
+      url.pathname === "/admin/chats" ||
+      url.pathname.startsWith("/admin/chats/")
+    ) {
+      return adminExtra.fetch(adminExtraRequest(request, url), env, ctx);
+    }
 
     if (request.method === "POST" && url.pathname === "/hooks/kyc") {
       return handleKycWebhook(env, request);
@@ -155,6 +177,12 @@ export default {
     }
     if (request.method === "POST" && url.pathname === "/api/kyc/demo-verify") {
       return handleDemoKycVerify(request, env, await sessionOf(request, env));
+    }
+    if (request.method === "GET" && url.pathname === "/api/kyc/manual/status") {
+      return handleManualKycStatus(env, await sessionOf(request, env));
+    }
+    if (request.method === "POST" && url.pathname === "/api/kyc/manual") {
+      return handleManualKycSubmit(request, env, await sessionOf(request, env));
     }
     if (url.pathname === "/api/profile") {
       const session = await sessionOf(request, env);
