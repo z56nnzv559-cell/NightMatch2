@@ -51,8 +51,7 @@ function applyPhoto(media, entry, name) {
   const primary = entry?.primary || urls[0] || null;
   visualHost.replaceChildren();
 
-  const oldBadge = media.querySelector('[data-nm-photo-badge="1"]');
-  oldBadge?.remove();
+  media.querySelector('[data-nm-photo-badge="1"]')?.remove();
 
   if (!primary) {
     visualHost.appendChild(makePlaceholder(name));
@@ -114,16 +113,18 @@ export default function ShopPhotoListingDecorator() {
     let cancelled = false;
     let photos = new Map();
 
+    const refreshDecoratedPhotos = () => {
+      document.querySelectorAll('[data-nm-shop-media="1"]').forEach((media) => {
+        const name = media.dataset.nmShopName || "";
+        if (name) applyPhoto(media, photos.get(name), name);
+      });
+    };
+
     const decorate = () => {
       if (cancelled) return;
 
       document.querySelectorAll(".nm2-job").forEach((card) => {
-        if (card.dataset.nmShopPhotoDecorated === "1") {
-          const media = card.querySelector('[data-nm-shop-media="1"]');
-          const name = media?.dataset?.nmShopName || "";
-          if (media && name) applyPhoto(media, photos.get(name), name);
-          return;
-        }
+        if (card.dataset.nmShopPhotoDecorated === "1") return;
 
         const nameEl = card.firstElementChild;
         const metaEl = nameEl?.nextElementSibling;
@@ -201,6 +202,7 @@ export default function ShopPhotoListingDecorator() {
             return [String(job.shop_name || "").trim(), { primary, urls }];
           })
         );
+        refreshDecoratedPhotos();
         decorate();
       })
       .catch(() => {
