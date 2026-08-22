@@ -28,17 +28,102 @@ const MEDIA_FILL_STYLE = {
   height: "100%",
 };
 
+function makePlaceholder(name) {
+  const visual = document.createElement("div");
+  visual.setAttribute("aria-label", `${name} 店舗写真未登録`);
+  visual.textContent = Array.from(name)[0] || "店";
+  Object.assign(visual.style, MEDIA_FILL_STYLE, {
+    display: "grid",
+    placeItems: "center",
+    background: "linear-gradient(135deg, #342A3C 0%, #1E1825 100%)",
+    color: "#E2B968",
+    fontSize: "56px",
+    fontWeight: "850",
+  });
+  return visual;
+}
+
+function applyPhoto(media, entry, name) {
+  const visualHost = media.querySelector('[data-nm-shop-visual="1"]');
+  if (!visualHost) return;
+
+  const urls = Array.isArray(entry?.urls) ? entry.urls.filter(Boolean) : [];
+  const primary = entry?.primary || urls[0] || null;
+  visualHost.replaceChildren();
+
+  const oldBadge = media.querySelector('[data-nm-photo-badge="1"]');
+  oldBadge?.remove();
+
+  if (!primary) {
+    visualHost.appendChild(makePlaceholder(name));
+    media.removeAttribute("role");
+    media.removeAttribute("tabindex");
+    media.removeAttribute("aria-label");
+    media.style.cursor = "default";
+    media.onclick = null;
+    media.onkeydown = null;
+    return;
+  }
+
+  const image = document.createElement("img");
+  image.src = primary;
+  image.alt = `${name} 店舗写真`;
+  Object.assign(image.style, MEDIA_FILL_STYLE, {
+    objectFit: "cover",
+    display: "block",
+  });
+  visualHost.appendChild(image);
+
+  const galleryUrls = urls.length ? urls : [primary];
+  const open = () => openPhotoGallery({ urls: galleryUrls, title: name });
+  media.setAttribute("role", "button");
+  media.setAttribute("tabindex", "0");
+  media.setAttribute("aria-label", `${name}の写真を見る`);
+  media.style.cursor = "zoom-in";
+  media.onclick = open;
+  media.onkeydown = (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      open();
+    }
+  };
+
+  if (galleryUrls.length > 1) {
+    const badge = document.createElement("div");
+    badge.dataset.nmPhotoBadge = "1";
+    badge.textContent = `写真 ${galleryUrls.length}枚`;
+    Object.assign(badge.style, {
+      position: "absolute",
+      top: "12px",
+      right: "12px",
+      zIndex: "3",
+      padding: "6px 9px",
+      borderRadius: "999px",
+      background: "rgba(10,8,13,.72)",
+      color: "#FFFFFF",
+      fontSize: "11px",
+      fontWeight: "800",
+      pointerEvents: "none",
+    });
+    media.appendChild(badge);
+  }
+}
+
 export default function ShopPhotoListingDecorator() {
   useEffect(() => {
     let cancelled = false;
-    let ready = false;
     let photos = new Map();
 
     const decorate = () => {
-      if (cancelled || !ready) return;
+      if (cancelled) return;
 
       document.querySelectorAll(".nm2-job").forEach((card) => {
-        if (card.dataset.nmShopPhotoDecorated === "1") return;
+        if (card.dataset.nmShopPhotoDecorated === "1") {
+          const media = card.querySelector('[data-nm-shop-media="1"]');
+          const name = media?.dataset?.nmShopName || "";
+          if (media && name) applyPhoto(media, photos.get(name), name);
+          return;
+        }
 
         const nameEl = card.firstElementChild;
         const metaEl = nameEl?.nextElementSibling;
@@ -46,70 +131,20 @@ export default function ShopPhotoListingDecorator() {
         if (!nameEl || !name) return;
 
         const media = document.createElement("div");
+        media.dataset.nmShopMedia = "1";
+        media.dataset.nmShopName = name;
         Object.assign(media.style, MEDIA_FRAME_STYLE);
 
-        const entry = photos.get(name);
-        const urls = entry?.urls || [];
-        const url = entry?.primary || null;
-        let visual;
-        if (url) {
-          visual = document.createElement("img");
-          visual.src = url;
-          visual.alt = `${name} 店舗写真`;
-          Object.assign(visual.style, MEDIA_FILL_STYLE, {
-            objectFit: "cover",
-            display: "block",
-          });
-
-          media.setAttribute("role", "button");
-          media.setAttribute("tabindex", "0");
-          media.setAttribute("aria-label", `${name}の写真を見る`);
-          media.style.cursor = "zoom-in";
-          const open = () => openPhotoGallery({ urls: urls.length ? urls : [url], title: name });
-          media.addEventListener("click", open);
-          media.addEventListener("keydown", (event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              open();
-            }
-          });
-
-          if (urls.length > 1) {
-            const badge = document.createElement("div");
-            badge.textContent = `写真 ${urls.length}枚`;
-            Object.assign(badge.style, {
-              position: "absolute",
-              top: "12px",
-              right: "12px",
-              zIndex: "3",
-              padding: "6px 9px",
-              borderRadius: "999px",
-              background: "rgba(10,8,13,.72)",
-              color: "#FFFFFF",
-              fontSize: "11px",
-              fontWeight: "800",
-              pointerEvents: "none",
-            });
-            media.appendChild(badge);
-          }
-        } else {
-          visual = document.createElement("div");
-          visual.setAttribute("aria-label", `${name} 店舗写真未登録`);
-          visual.textContent = Array.from(name)[0] || "店";
-          Object.assign(visual.style, MEDIA_FILL_STYLE, {
-            display: "grid",
-            placeItems: "center",
-            background: "linear-gradient(135deg, #342A3C 0%, #1E1825 100%)",
-            color: "#E2B968",
-            fontSize: "56px",
-            fontWeight: "850",
-          });
-        }
+        const visualHost = document.createElement("div");
+        visualHost.dataset.nmShopVisual = "1";
+        Object.assign(visualHost.style, MEDIA_FILL_STYLE);
+        visualHost.appendChild(makePlaceholder(name));
 
         const overlay = document.createElement("div");
         Object.assign(overlay.style, {
           position: "absolute",
           inset: "0",
+          zIndex: "2",
           display: "flex",
           alignItems: "flex-end",
           padding: "18px",
@@ -146,39 +181,50 @@ export default function ShopPhotoListingDecorator() {
         textWrap.appendChild(nameEl);
         if (metaEl) textWrap.appendChild(metaEl);
         overlay.appendChild(textWrap);
-        media.appendChild(visual);
-        media.appendChild(overlay);
+        media.append(visualHost, overlay);
         card.prepend(media);
         card.dataset.nmShopPhotoDecorated = "1";
+
+        applyPhoto(media, photos.get(name), name);
       });
     };
 
-    api("/api/me").then((me) => {
-      if (cancelled || me?.session?.kind !== "worker") return null;
-      return api("/api/jobs?sort=new&limit=50");
-    }).then((data) => {
-      if (cancelled || !data) return;
-      photos = new Map(
-        (data.jobs || [])
-          .filter((job) => job.shop_photo_url)
-          .map((job) => {
-            const primary = job.shop_photo_url;
+    const loadPhotos = () => api("/api/jobs?sort=new&limit=50")
+      .then((data) => {
+        if (cancelled) return;
+        photos = new Map(
+          (data.jobs || []).map((job) => {
+            const primary = job.shop_photo_url || null;
             const urls = Array.isArray(job.shop_photo_urls) && job.shop_photo_urls.length
               ? job.shop_photo_urls.filter(Boolean)
-              : [primary];
+              : primary ? [primary] : [];
             return [String(job.shop_name || "").trim(), { primary, urls }];
           })
-      );
-      ready = true;
-      decorate();
-    }).catch(() => {
-      ready = true;
-      decorate();
-    });
+        );
+        decorate();
+      })
+      .catch(() => {
+        /* 写真APIが一時的に失敗しても、店舗カードの写真枠は必ず残す。 */
+        decorate();
+      });
+
+    /* カードを先に描画する。セッション/API取得のタイミングには依存させない。 */
+    decorate();
+    loadPhotos();
 
     const observer = new MutationObserver(decorate);
     observer.observe(document.body, { childList: true, subtree: true });
-    return () => { cancelled = true; observer.disconnect(); };
+    const onFocus = () => loadPhotos();
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("pageshow", onFocus);
+
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("pageshow", onFocus);
+    };
   }, []);
+
   return null;
 }
